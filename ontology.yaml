@@ -1,0 +1,60 @@
+ontology:
+  version: 1
+
+  # ── Объекты домена офиса: над чем и кем оперирует система ──────────────────
+  object_types:
+    - name: Agent
+      key: agent_id
+      properties: [name, role, model]
+    - name: Repository
+      key: repo
+      properties: [url, default_branch]
+    - name: Task
+      key: task_id
+      properties: [title, status, assigned_agent]
+    - name: PullRequest
+      key: pr_id
+      properties: [repo, branch, status]
+
+  # ── Политика тиров: ЕДИНСТВЕННОЕ место, где решается, что требует человека ─
+  risk_tiers:
+    AUTO:     { requires_approval: false, description: "Чтение/поиск — не меняет состояние" }
+    LOW:      { requires_approval: false, description: "Обратимо и дёшево" }
+    MEDIUM:   { requires_approval: false, description: "Изменения в рабочей ветке, обратимо через git" }
+    HIGH:     { requires_approval: true,  description: "Влияет на общую ветку или историю" }
+    CRITICAL: { requires_approval: true,  description: "Необратимо либо затрагивает прод/секреты" }
+
+  # ── Каталог Действий: ЕДИНСТВЕННЫЙ список того, что агент может предложить ──
+  # Тир здесь — закон. Агент не может его переопределить.
+  action_types:
+    - { name: read_file,     target: Repository,  tier: AUTO }
+    - { name: search_code,   target: Repository,  tier: AUTO }
+    - { name: lint,          target: Repository,  tier: AUTO }
+    - { name: run_tests,     target: Repository,  tier: LOW }
+    - { name: create_branch, target: Repository,  tier: LOW }
+    - { name: write_file,    target: Repository,  tier: HIGH }
+    - { name: commit,        target: Repository,  tier: HIGH }
+    - { name: open_pr,       target: Repository,  tier: MEDIUM }
+    - { name: merge_pr,      target: PullRequest, tier: HIGH }
+    - { name: delete_branch, target: Repository,  tier: HIGH }
+    - { name: force_push,    target: Repository,  tier: CRITICAL }
+    - { name: deploy,        target: Repository,  tier: CRITICAL }
+    - { name: rotate_secret, target: Repository,  tier: CRITICAL }
+
+  # ── Штат офиса: роли и полномочия (какие действия роль вправе предложить) ──
+  agents:
+    - name: kristina
+      role: "Lead / диспетчер"
+      allowed_actions: [read_file, search_code]
+    - name: bjorn
+      role: "Backend-разработчик"
+      allowed_actions: [read_file, search_code, lint, run_tests, create_branch, write_file, commit, open_pr]
+    - name: elsa
+      role: "Frontend-разработчик"
+      allowed_actions: [read_file, search_code, lint, run_tests, create_branch, write_file, commit, open_pr]
+    - name: sven
+      role: "DevOps"
+      allowed_actions: [read_file, search_code, run_tests, create_branch, merge_pr, delete_branch, force_push, deploy, rotate_secret]
+    - name: ingrid
+      role: "QA"
+      allowed_actions: [read_file, search_code, lint, run_tests]

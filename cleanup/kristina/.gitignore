@@ -1,0 +1,31 @@
+# ── Python ───────────────────────────────────────────────
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Node / Vite (app/) ───────────────────────────────────
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+
+# ── Секреты и локальные данные ───────────────────────────
+.env
+.env.*
+!.env.example
+*.db
+office_audit.db
+office_tasks.db
+
+# ── ОС / редакторы ───────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.log

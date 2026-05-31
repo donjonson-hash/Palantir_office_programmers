@@ -1,0 +1,51 @@
+name: Validate Ontology
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths: [ 'ontology.yaml' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - run: pip install pyyaml
+    - name: Check ontology.yaml
+      run: |
+        python - << 'PY'
+        import sys, yaml
+        # Файл обязан существовать: если CI про онтологию, её отсутствие — ошибка.
+        with open("ontology.yaml", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        onto = (data or {}).get("ontology")
+        if not onto:
+            sys.exit("нет ключа 'ontology'")
+
+        tiers = onto.get("risk_tiers", {})
+        actions = onto.get("action_types", [])
+        if not tiers:
+            sys.exit("нет risk_tiers")
+        if not actions:
+            sys.exit("нет action_types")
+
+        # Каждый Action Type должен ссылаться на существующий тир.
+        bad = [a["name"] for a in actions if a.get("tier") not in tiers]
+        if bad:
+            sys.exit(f"действия с неизвестным тиром: {bad}")
+
+        # Полномочия агентов должны указывать на существующие действия.
+        names = {a["name"] for a in actions}
+        for ag in onto.get("agents", []):
+            unknown = set(ag.get("allowed_actions", [])) - names
+            if unknown:
+                sys.exit(f"агент {ag['name']}: неизвестные действия {unknown}")
+
+        print(f"OK: {len(actions)} действий, {len(tiers)} тиров, "
+              f"{len(onto.get('agents', []))} агентов")
+        PY

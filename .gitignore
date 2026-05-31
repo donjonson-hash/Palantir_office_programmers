@@ -1,0 +1,24 @@
+# Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Vite
+node_modules/
+dist/
+
+# Секреты и локальные данные
+.env
+.env.*
+!.env.example
+*.db
+
+# ОС / редакторы
+.DS_Store
+.idea/
+.vscode/
+*.log
