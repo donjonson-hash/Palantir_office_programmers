@@ -6,6 +6,8 @@ Office Server — HTTP-фасад офиса для командного цен�
 одобрений живут в Action Service (шлюзе), центр ходит туда напрямую.
 """
 from __future__ import annotations
+from dotenv import load_dotenv
+load_dotenv()
 
 import hashlib
 import os

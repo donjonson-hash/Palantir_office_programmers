@@ -6,6 +6,8 @@ LLM-слой офиса — переосмысленный apiClient.ts: пер�
 Для тестов есть FakeLLM — без сети и ключей.
 """
 from __future__ import annotations
+from dotenv import load_dotenv
+load_dotenv()
 
 import os
 from typing import Protocol
