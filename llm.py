@@ -7,7 +7,7 @@ LLM-слой офиса — переосмысленный apiClient.ts: пер�
 """
 from __future__ import annotations
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 import os
 from typing import Protocol
@@ -34,12 +34,13 @@ class OpenAICompatibleLLM:
         r = httpx.post(
             f"{self.base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}"},
-            json={"model": self.model, "temperature": 0,
+            json={"model": self.model, "temperature": 0, "max_tokens": 1024,
                   "messages": [{"role": "system", "content": system},
                                {"role": "user", "content": user}]},
             timeout=60,
         )
-        r.raise_for_status()
+        if r.status_code >= 400:
+            raise RuntimeError(f"AITunnel {r.status_code}: {r.text[:600]}")
         return r.json()["choices"][0]["message"]["content"]
 
 

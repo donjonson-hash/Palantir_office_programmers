@@ -7,7 +7,7 @@ Office Server — HTTP-фасад офиса для командного цен�
 """
 from __future__ import annotations
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 import hashlib
 import os

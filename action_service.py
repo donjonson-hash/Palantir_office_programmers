@@ -11,7 +11,7 @@ Action Service — единственный шлюз мутаций офиса (
 """
 from __future__ import annotations
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 import hashlib
 import json
