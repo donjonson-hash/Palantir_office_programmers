@@ -195,6 +195,17 @@ def runs() -> dict:
     return {"runs": runner.list_runs()}
 
 
+@app.post("/office/continue-by-action/{action_id}")
+def continue_by_action(action_id: str) -> dict:
+    """Кнопка Approve дёргает это после одобрения: если действие принадлежит
+    задаче на паузе — продолжаем её. Если нет — тихо ничего не делаем."""
+    disp, gateway = _office_and_gateway()
+    run_id = runner.find_run_by_pending(action_id)
+    if not run_id:
+        return {"run": None}
+    return {"run": runner.continue_run(run_id, disp.office, gateway)}
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "agents": len(load_roster(ONTOLOGY_PATH))}

@@ -98,6 +98,22 @@ export const approve = (id: string, approver = 'human') =>
   fetch(`${GATEWAY}/actions/${id}/approve?approver=${encodeURIComponent(approver)}`,
     { method: 'POST' }).then((r) => json<ActionRecord>(r));
 
+export interface RunState {
+  id: string;
+  goal: string;
+  agent_id: string;
+  status: string;
+  history: { action: string; target: string; result: string; status: string }[];
+  pending_action_id: string | null;
+  steps: number;
+  summary: string | null;
+}
+
+// После одобрения действия — продолжить связанную задачу (если есть).
+export const continueByAction = (actionId: string) =>
+  fetch(`${OFFICE}/office/continue-by-action/${actionId}`, { method: 'POST' })
+    .then((r) => json<{ run: RunState | null }>(r));
+
 export const reject = (id: string, approver = 'human') =>
   fetch(`${GATEWAY}/actions/${id}/reject?approver=${encodeURIComponent(approver)}`,
     { method: 'POST' }).then((r) => json<ActionRecord>(r));

@@ -154,6 +154,16 @@ def continue_run(run_id: str, office: dict, gateway: Any) -> dict:
     return drive(run_id, office, gateway)
 
 
+def find_run_by_pending(action_id: str) -> str | None:
+    """Найти задачу, которая стоит на паузе именно из-за этого действия."""
+    with closing(_db()) as conn:
+        row = conn.execute(
+            "SELECT id FROM runs WHERE pending_action_id = :a "
+            "AND status = 'waiting_approval'", {"a": action_id}
+        ).fetchone()
+    return row["id"] if row else None
+
+
 def list_runs(limit: int = 50) -> list[dict]:
     with closing(_db()) as conn:
         rows = conn.execute(

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { CheckCircle2, XCircle, Clock, Shield, AlertCircle } from 'lucide-react';
-import { listPending, approve, reject, type ActionRecord } from '@/lib/api';
+import { listPending, approve, reject, continueByAction, type ActionRecord } from '@/lib/api';
 
 const tierColor: Record<string, string> = {
   CRITICAL: 'text-red-600 bg-red-50 border-red-200',
@@ -12,6 +12,7 @@ export default function Approvals() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<Set<string>>(new Set());
+  const [note, setNote] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     setLoading(true);
@@ -26,9 +27,25 @@ export default function Approvals() {
   const decide = async (id: string, kind: 'approve' | 'reject') => {
     if (busy.has(id)) return;
     setBusy((p) => new Set(p).add(id));
+    setNote(null);
     try {
-      await (kind === 'approve' ? approve(id, 'don') : reject(id, 'don'));
-      setItems((prev) => prev.filter((r) => r.id !== id)); // ушло из очереди
+      if (kind === 'approve') {
+        await approve(id, 'don');
+        // Если действие принадлежит многошаговой задаче — продолжить её.
+        const { run } = await continueByAction(id);
+        if (run) {
+          setNote(
+            run.status === 'done'
+              ? `Задача завершена: ${run.summary ?? 'готово'}`
+              : run.status === 'waiting_approval'
+                ? 'Задача продолжилась и ждёт одобрения следующего шага.'
+                : `Задача: ${run.status}.`,
+          );
+        }
+      } else {
+        await reject(id, 'don');
+      }
+      await refresh();   // подтянуть новый шаг задачи или опустевшую очередь
     } catch (e) {
       alert(`Ошибка: ${e instanceof Error ? e.message : 'unknown'}`);
     } finally {
@@ -46,6 +63,11 @@ export default function Approvals() {
 
   return (
     <div className="p-6 space-y-6">
+      {note && (
+        <div className="flex items-center gap-2 px-4 py-3 rounded-xl bg-sky-50 border border-sky-200 text-sm text-sky-800">
+          <CheckCircle2 size={16} className="text-sky-600" /> {note}
+        </div>
+      )}
       {items.length > 0 ? (
         <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800">
           <Shield size={18} className="text-amber-600 flex-shrink-0" />
