@@ -34,7 +34,7 @@ ontology:
     - { name: create_branch, target: Repository,  tier: LOW }
     - { name: write_file,    target: Repository,  tier: HIGH }
     - { name: commit,        target: Repository,  tier: HIGH }
-    - { name: open_pr,       target: Repository,  tier: MEDIUM }
+    - { name: open_pr,       target: Repository,  tier: HIGH }
     - { name: merge_pr,      target: PullRequest, tier: HIGH }
     - { name: delete_branch, target: Repository,  tier: HIGH }
     - { name: force_push,    target: Repository,  tier: CRITICAL }

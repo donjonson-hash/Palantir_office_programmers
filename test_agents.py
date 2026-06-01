@@ -14,6 +14,14 @@ os.environ["AUDIT_DB_PATH"] = _tmp.name
 
 from fastapi.testclient import TestClient  # noqa: E402
 import action_service  # noqa: E402
+import pytest  # noqa: E402
+
+os.environ.pop("WORKSPACE_ROOT", None)  # герметичность: исполнитель = заглушка
+
+
+@pytest.fixture(autouse=True)
+def _stub_executor(monkeypatch):
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
 from agents import Gateway, build_office  # noqa: E402
 from llm import FakeLLM  # noqa: E402
 

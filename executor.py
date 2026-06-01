@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Protocol
@@ -54,6 +55,16 @@ class LocalExecutor:
             raise PermissionError(f"путь вне проекта запрещён: {rel}")
         return p
 
+    @staticmethod
+    def _param(p: dict, *names: str) -> str:
+        # Агент может назвать поле по-разному (path/file, branch/name, ...).
+        # Принимаем любой из ожидаемых ключей, иначе — внятная ошибка.
+        for n in names:
+            v = p.get(n)
+            if v:
+                return str(v)
+        raise ValueError(f"не указан параметр (ожидался один из: {', '.join(names)})")
+
     def _sh(self, cmd: str) -> str:
         r = subprocess.run(shlex.split(cmd), cwd=self.root, capture_output=True,
                            text=True, timeout=CMD_TIMEOUT)
@@ -71,13 +82,11 @@ class LocalExecutor:
 
     # — Чтение/поиск (AUTO) —
     def _read_file(self, p: dict) -> str:
-        path = self._resolve(p["path"])
+        path = self._resolve(self._param(p, "path", "file", "filename"))
         return path.read_text(encoding="utf-8", errors="replace")[:MAX_READ_BYTES]
 
     def _search_code(self, p: dict) -> str:
-        pattern = p.get("pattern") or p.get("query") or ""
-        if not pattern:
-            raise ValueError("не указан pattern/query для поиска")
+        pattern = self._param(p, "pattern", "query", "q")
         hits: list[str] = []
         for f in self.root.rglob("*"):
             if not f.is_file() or ".git" in f.parts or "node_modules" in f.parts:
@@ -101,18 +110,50 @@ class LocalExecutor:
 
     # — Запись/git (MEDIUM) —
     def _write_file(self, p: dict) -> str:
-        path = self._resolve(p["path"])
+        rel = self._param(p, "path", "file", "filename")
+        path = self._resolve(rel)
         path.parent.mkdir(parents=True, exist_ok=True)
-        content = p.get("content", "")
+        content = p.get("content") or p.get("text") or ""
         path.write_text(content, encoding="utf-8")
-        return f"записано {len(content)} символов → {p['path']}"
+        return f"записано {len(content)} символов → {rel}"
 
     def _create_branch(self, p: dict) -> str:
-        return self._argv("git", "checkout", "-b", p["branch"])
+        return self._argv("git", "checkout", "-b", self._param(p, "branch", "name", "branch_name"))
 
     def _commit(self, p: dict) -> str:
         self._argv("git", "add", "-A")
-        return self._argv("git", "commit", "-m", p["message"])
+        return self._argv("git", "commit", "-m", self._param(p, "message", "msg", "m"))
+
+    # — Pull request через gh CLI (HIGH) —
+    def _open_pr(self, p: dict) -> str:
+        title = (p.get("title") or p.get("message") or "").strip()
+        if not title:
+            raise ValueError("не указан title для PR")
+        body = p.get("body", "")
+        base = p.get("base", "main")
+        # текущая ветка
+        branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=self.root, capture_output=True, text=True, timeout=CMD_TIMEOUT,
+        ).stdout.strip()
+        # Никогда не публикуем напрямую из защищённых веток.
+        if not branch or branch in {base, "main", "master", "HEAD"}:
+            raise ValueError(
+                f"PR нельзя открыть из ветки '{branch}' — сначала создай отдельную "
+                "ветку (create_branch)")
+        # Все дешёвые проверки до записи в remote.
+        if shutil.which("gh") is None:
+            raise RuntimeError("gh CLI не установлен — поставь GitHub CLI и выполни 'gh auth login'")
+        push = subprocess.run(["git", "push", "-u", "origin", branch],
+                              cwd=self.root, capture_output=True, text=True, timeout=CMD_TIMEOUT)
+        if push.returncode != 0:
+            raise RuntimeError(f"git push не удался: {(push.stderr or push.stdout).strip()[:400]}")
+        pr = subprocess.run(["gh", "pr", "create", "--base", base, "--head", branch,
+                             "--title", title, "--body", body],
+                            cwd=self.root, capture_output=True, text=True, timeout=CMD_TIMEOUT)
+        if pr.returncode != 0:
+            raise RuntimeError(f"gh pr create не удался: {(pr.stderr or pr.stdout).strip()[:400]}")
+        return f"PR открыт: {pr.stdout.strip()}"
 
     def _argv(self, *args: str) -> str:
         r = subprocess.run(list(args), cwd=self.root, capture_output=True,

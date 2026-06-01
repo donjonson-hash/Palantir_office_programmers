@@ -14,8 +14,16 @@ os.environ["AUDIT_DB_PATH"] = _tmp.name
 
 from fastapi.testclient import TestClient  # noqa: E402
 import action_service  # noqa: E402
+import pytest  # noqa: E402
 
 client = TestClient(action_service.app)
+
+
+@pytest.fixture(autouse=True)
+def _stub_executor(monkeypatch):
+    # Исполнитель = заглушка независимо от .env: убираем WORKSPACE_ROOT перед
+    # каждым тестом (на этапе выполнения, когда импорты-load_dotenv уже позади).
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
 
 
 def test_auto_action_executes_immediately():
