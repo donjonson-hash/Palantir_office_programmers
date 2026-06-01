@@ -6,6 +6,7 @@ Office Server — HTTP-фасад офиса для командного цен�
 одобрений живут в Action Service (шлюзе), центр ходит туда напрямую.
 """
 from __future__ import annotations
+
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
@@ -23,6 +24,7 @@ from pydantic import BaseModel
 from agents import Gateway, build_office, load_roster
 from dispatcher import Dispatcher
 from llm import OpenAICompatibleLLM
+import runner
 
 ONTOLOGY_PATH = os.getenv("ONTOLOGY_PATH", "ontology.yaml")
 GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:8000")
@@ -149,6 +151,48 @@ def get_ontology() -> dict:
                     "allowed_actions": a.get("allowed_actions", [])}
                    for a in onto.get("agents", [])],
     }
+
+
+# ─── Рабочий цикл агента (многошаговые задачи) ───────────────────────────────
+
+class RunRequest(BaseModel):
+    goal: str
+
+
+def _office_and_gateway():
+    disp = get_dispatcher()
+    gateway = next(iter(disp.office.values())).gateway
+    return disp, gateway
+
+
+@app.post("/office/run")
+def start_run(req: RunRequest) -> dict:
+    disp, gateway = _office_and_gateway()
+    agent_id, _ = disp.route(req.goal)
+    run_id = runner.create_run(req.goal, agent_id)
+    return runner.drive(run_id, disp.office, gateway)
+
+
+@app.post("/office/run/{run_id}/continue")
+def continue_run(run_id: str) -> dict:
+    disp, gateway = _office_and_gateway()
+    try:
+        return runner.continue_run(run_id, disp.office, gateway)
+    except KeyError:
+        raise HTTPException(404, "Задача не найдена")
+
+
+@app.get("/office/run/{run_id}")
+def run_state(run_id: str) -> dict:
+    try:
+        return runner.get_state(run_id)
+    except KeyError:
+        raise HTTPException(404, "Задача не найдена")
+
+
+@app.get("/office/runs")
+def runs() -> dict:
+    return {"runs": runner.list_runs()}
 
 
 @app.get("/health")

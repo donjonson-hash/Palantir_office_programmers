@@ -78,11 +78,15 @@ class LocalExecutor:
             # (например CRITICAL: deploy/force_push/rotate_secret). Не делаем
             # ничего опасного молча — честно сообщаем.
             raise NotImplementedError(f"действие '{action}' не реализовано локальным исполнителем")
-        return handler(params)
+        # Некоторые агенты кладут путь/имя в target, а не в params. Даём handler'ам
+        # target как ЗАПАСНОЙ источник (явные params всегда в приоритете).
+        p = dict(params)
+        p.setdefault("_target", target)
+        return handler(p)
 
     # — Чтение/поиск (AUTO) —
     def _read_file(self, p: dict) -> str:
-        path = self._resolve(self._param(p, "path", "file", "filename"))
+        path = self._resolve(self._param(p, "path", "file", "filename", "_target"))
         return path.read_text(encoding="utf-8", errors="replace")[:MAX_READ_BYTES]
 
     def _search_code(self, p: dict) -> str:
@@ -110,7 +114,7 @@ class LocalExecutor:
 
     # — Запись/git (MEDIUM) —
     def _write_file(self, p: dict) -> str:
-        rel = self._param(p, "path", "file", "filename")
+        rel = self._param(p, "path", "file", "filename", "_target")
         path = self._resolve(rel)
         path.parent.mkdir(parents=True, exist_ok=True)
         content = p.get("content") or p.get("text") or ""

@@ -45,6 +45,12 @@ class Gateway:
         r.raise_for_status()
         return r.json()
 
+    def get_action(self, action_id: str) -> dict:
+        url = f"{self.base_url}/actions/{action_id}"
+        r = (self._client.get(url) if self._client else httpx.get(url, timeout=30))
+        r.raise_for_status()
+        return r.json()
+
 
 # ─── Онтология: штат и полномочия ────────────────────────────────────────────
 
@@ -91,6 +97,29 @@ class Agent:
                                       choice.get("target", ""), choice.get("params", {}))
         return {"agent": self.id, "action": action,
                 "reason": choice.get("reason", ""), "gateway": result}
+
+    # Многошаговый режим: агент видит историю и решает СЛЕДУЮЩИЙ шаг или 'done'.
+    def next_step(self, goal: str, history: list[dict]) -> dict:
+        hist = "\n".join(
+            f"{i}. {h.get('action')}({h.get('target', '')}) → "
+            f"{str(h.get('result', ''))[:300]}"
+            for i, h in enumerate(history, 1)
+        ) or "(пусто)"
+        system = LOOP_PROMPT.format(
+            name=self.id, role=self.role,
+            actions=", ".join(self.allowed) or "нет", goal=goal, history=hist)
+        return _parse_json(self.llm.complete(system, "Следующий шаг?"))
+
+
+LOOP_PROMPT = """Ты — {name}, {role}. Рабочая цель: {goal}
+Доступные тебе действия (Action Types): {actions}.
+История уже выполненных шагов (действие → итог):
+{history}
+Реши СЛЕДУЮЩИЙ шаг и ответь строго одним JSON-объектом без пояснений:
+- действие: {{"action":"<имя>","target":"<репозиторий/объект>","params":{{...}},"reason":"<кратко>"}}
+- завершить: {{"done":true,"summary":"<что сделано>"}}
+Учитывай итоги прошлых шагов: если шаг провалился — исправься или заверши;
+не повторяй уже выполненное. Когда цель достигнута — верни done."""
 
 
 def _parse_json(text: str) -> dict:

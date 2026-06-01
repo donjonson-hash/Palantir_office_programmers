@@ -10,6 +10,7 @@ Action Service — единственный шлюз мутаций офиса (
 шлюзом — обойти его нельзя.
 """
 from __future__ import annotations
+
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
@@ -255,6 +256,14 @@ def audit(limit: int = 50) -> dict:
             "SELECT * FROM actions ORDER BY created_at DESC LIMIT :n", {"n": limit}
         ).fetchall()
     return {"audit": [dict(r) for r in rows]}
+
+
+@app.get("/actions/{action_id}")
+def get_action(action_id: str) -> dict:
+    row = _get(action_id)
+    if row is None:
+        raise HTTPException(404, "Действие не найдено")
+    return dict(row)
 
 
 @app.get("/health")

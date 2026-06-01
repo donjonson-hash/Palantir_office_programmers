@@ -139,3 +139,10 @@ def test_param_name_variants_accepted(repo):
     assert (repo / "x.txt").read_text() == "hi"
     out = ex.run("create_branch", "r", {"name": "office/alt"})       # name вместо branch
     assert "exit=0" in out
+
+
+def test_write_file_falls_back_to_target_as_path(repo):
+    # Агент положил имя файла в target, а не в params.path → берём из target.
+    ex = LocalExecutor(repo)
+    ex.run("write_file", "NOTES.md", {"content": "привет"})   # path только в target
+    assert (repo / "NOTES.md").read_text(encoding="utf-8") == "привет"

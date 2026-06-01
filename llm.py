@@ -6,6 +6,7 @@ LLM-слой офиса — переосмысленный apiClient.ts: пер�
 Для тестов есть FakeLLM — без сети и ключей.
 """
 from __future__ import annotations
+
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
@@ -34,13 +35,12 @@ class OpenAICompatibleLLM:
         r = httpx.post(
             f"{self.base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}"},
-            json={"model": self.model, "temperature": 0, "max_tokens": 1024,
+            json={"model": self.model, "temperature": 0,
                   "messages": [{"role": "system", "content": system},
                                {"role": "user", "content": user}]},
             timeout=60,
         )
-        if r.status_code >= 400:
-            raise RuntimeError(f"AITunnel {r.status_code}: {r.text[:600]}")
+        r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"]
 
 
@@ -54,3 +54,19 @@ class FakeLLM:
     def complete(self, system: str, user: str) -> str:
         self.calls.append((system, user))
         return self.canned
+
+
+class ScriptedLLM:
+    """Возвращает ответы по списку, по одному на вызов (для многошаговых тестов).
+    После исчерпания списка отдаёт 'done'."""
+
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = list(responses)
+        self.i = 0
+
+    def complete(self, system: str, user: str) -> str:
+        if self.i < len(self.responses):
+            r = self.responses[self.i]
+            self.i += 1
+            return r
+        return '{"done": true, "summary": "конец сценария"}'
