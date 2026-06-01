@@ -75,7 +75,9 @@ class LocalExecutor:
         return path.read_text(encoding="utf-8", errors="replace")[:MAX_READ_BYTES]
 
     def _search_code(self, p: dict) -> str:
-        pattern = p["pattern"]
+        pattern = p.get("pattern") or p.get("query") or ""
+        if not pattern:
+            raise ValueError("не указан pattern/query для поиска")
         hits: list[str] = []
         for f in self.root.rglob("*"):
             if not f.is_file() or ".git" in f.parts or "node_modules" in f.parts:
