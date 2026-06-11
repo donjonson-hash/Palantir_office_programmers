@@ -193,7 +193,8 @@ def start_project(req: ProjectRequest, background: BackgroundTasks) -> dict:
     Ответ возвращается сразу с планом; ход работы — в /office/events."""
     disp, gateway = _office_and_gateway()
     workers = {name: disp.office[name].role for name in disp.workers}
-    plan_id = planner.make_plan(req.goal, disp.llm, workers)
+    abilities = {name: sorted(disp.office[name].allowed) for name in disp.workers}
+    plan_id = planner.make_plan(req.goal, disp.llm, workers, abilities)
     plan = planner.get_plan(plan_id)
     if plan["status"] == "planned":
         background.add_task(planner.run_project, plan_id, disp.office, gateway)

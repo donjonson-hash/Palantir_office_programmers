@@ -94,9 +94,13 @@ def _save_subtasks(plan_id: str, subtasks: list[dict]) -> None:
 # ─── Планирование: Kristina декомпозирует цель ───────────────────────────────
 
 PLAN_PROMPT = """Ты — Kristina, лид команды разработки. Разбей цель проекта на подзадачи.
-Команда (имя — роль):
+Команда (имя — роль — доступные действия):
 {roster}
 Правила:
+- Подзадача обязана быть ВЫПОЛНИМОЙ перечисленными действиями её исполнителя.
+  У команды НЕТ способа запускать серверы, делать HTTP-запросы или открывать
+  браузер — не планируй интеграционные/ручные тесты. Проверка качества — это
+  run_tests и lint (их прогоняет финальная самопроверка автоматически).
 - Подзадачи В ПОРЯДКЕ ИСПОЛНЕНИЯ: сначала каркас/бэкенд, затем фронтенд, в конце проверка.
 - Каждой подзадаче — ОДИН исполнитель из команды (kristina не исполняет).
 - acceptance — проверяемый критерий готовности, конкретный.
@@ -109,10 +113,14 @@ PLAN_PROMPT = """Ты — Kristina, лид команды разработки. 
 "acceptance":"<критерий готовности>","depends_on":[<номера подзадач с 1>]}}]}}"""
 
 
-def make_plan(goal: str, llm: LLM, workers: dict[str, str]) -> str:
+def make_plan(goal: str, llm: LLM, workers: dict[str, str],
+              abilities: dict[str, list[str]] | None = None) -> str:
     """Сгенерировать план и сохранить. Возвращает plan_id.
-    workers: имя → роль (исполнители, без kristina)."""
-    roster = "\n".join(f"- {name} — {role}" for name, role in workers.items())
+    workers: имя → роль; abilities: имя → доступные действия (для реализма плана)."""
+    abilities = abilities or {}
+    roster = "\n".join(
+        f"- {name} — {role} — [{', '.join(abilities.get(name, [])) or 'нет данных'}]"
+        for name, role in workers.items())
     system = PLAN_PROMPT.format(roster=roster)
 
     subtasks: list[dict] = []

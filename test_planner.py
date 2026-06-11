@@ -146,3 +146,14 @@ def test_project_endpoint_plans_and_executes_in_background():
     assert state["status"] == "done"
     listed = client.get("/office/projects").json()["projects"]
     assert any(p["id"] == body["id"] for p in listed)
+
+
+def test_plan_prompt_includes_staff_abilities():
+    # Kristina видит, ЧТО умеет штат, — план не содержит невыполнимых подзадач.
+    from llm import FakeLLM
+    fake = FakeLLM(PLAN_2)
+    planner.make_plan("цель", fake, WORKERS,
+                      abilities={"bjorn": ["write_file", "run_tests"]})
+    system_prompt = fake.calls[-1][0]
+    assert "bjorn — Backend — [write_file, run_tests]" in system_prompt
+    assert "НЕТ способа запускать серверы" in system_prompt
