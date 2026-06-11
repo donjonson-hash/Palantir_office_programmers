@@ -30,6 +30,8 @@ from llm import LLM
 
 PLANS_DB_PATH = os.getenv("PLANS_DB_PATH", "office_plans.db")
 PLAN_RETRIES = int(os.getenv("PLAN_RETRIES", "3"))
+MAX_FIX_ITERATIONS = int(os.getenv("MAX_FIX_ITERATIONS", "3"))
+VERIFY_CHECKS = ("run_tests", "lint")
 
 
 # ─── Хранилище планов (переживает рестарт) ───────────────────────────────────
@@ -178,6 +180,68 @@ def _subtask_goal(goal: str, st: dict, total: int) -> str:
             f"КРИТЕРИЙ ГОТОВНОСТИ: {st['acceptance'] or 'подзадача выполнена по описанию'}")
 
 
+# ─── Самопроверка: контроль качества вместо человека ─────────────────────────
+
+def _check_passed(result: str) -> bool:
+    """Исход проверки решает код выхода. Заглушка (dry-run) считается успехом."""
+    if result.startswith("[stub]"):
+        return True
+    return result.startswith("exit=0")
+
+
+def _verify(plan_id: str, gateway: Any) -> tuple[bool, str]:
+    """Прогнать проверки от имени ingrid через шлюз. → (всё ок, отчёт)."""
+    events.publish("verify_started", agent="ingrid", plan_id=plan_id,
+                   checks=list(VERIFY_CHECKS))
+    failures = []
+    for check in VERIFY_CHECKS:
+        out = gateway.propose("ingrid", check, "workspace", {},
+                              reason="самопроверка проекта")
+        result = str(out.get("result") or out.get("status"))
+        if out.get("status") != "executed" or not _check_passed(result):
+            failures.append(f"=== {check} ===\n{result[:2000]}")
+    if failures:
+        report = "\n".join(failures)
+        events.publish("verify_failed", agent="ingrid", plan_id=plan_id,
+                       report=report[:1500])
+        return False, report
+    events.publish("verify_passed", agent="ingrid", plan_id=plan_id)
+    return True, ""
+
+
+def _fixer(subtasks: list[dict], office: dict) -> str:
+    """Кто чинит: исполнитель последней подзадачи, умеющий write_file."""
+    for st in reversed(subtasks):
+        agent = office.get(st["agent"])
+        if agent is not None and "write_file" in agent.allowed:
+            return st["agent"]
+    return "bjorn"
+
+
+def _verification_phase(plan_id: str, goal: str, subtasks: list[dict],
+                        office: dict, gateway: Any, ctx_provider: Any) -> bool:
+    """Цикл «проверка → исправление». True = проверки зелёные."""
+    for attempt in range(MAX_FIX_ITERATIONS + 1):
+        ok, report = _verify(plan_id, gateway)
+        if ok:
+            return True
+        if attempt == MAX_FIX_ITERATIONS:
+            return False
+        fixer = _fixer(subtasks, office)
+        events.publish("fix_iteration", agent=fixer, plan_id=plan_id,
+                       n=attempt + 1, of=MAX_FIX_ITERATIONS)
+        fix_goal = (f"ЦЕЛЬ ПРОЕКТА: {goal}\n"
+                    f"САМОПРОВЕРКА ПРОВАЛЕНА (итерация {attempt + 1} из {MAX_FIX_ITERATIONS}). "
+                    f"Вывод проверок:\n{report[:4000]}\n"
+                    f"ТВОЯ ЗАДАЧА: найди причину провала, исправь код и убедись, "
+                    f"что run_tests и lint проходят.")
+        run_id = runner.create_run(fix_goal, fixer, plan_id=plan_id)
+        state = runner.drive(run_id, office, gateway, ctx_provider)
+        if state["status"] != "done":
+            return False
+    return False
+
+
 def run_project(plan_id: str, office: dict, gateway: Any) -> dict:
     """Ведёт подзадачи плана последовательно до конца / первого провала.
     Синхронная функция: на сервере запускается в фоне (BackgroundTasks)."""
@@ -225,7 +289,16 @@ def run_project(plan_id: str, office: dict, gateway: Any) -> dict:
                        detail=detail)
         return get_plan(plan_id)
 
-    summary = f"все {total} подзадач выполнены"
+    if not _verification_phase(plan_id, plan["goal"], subtasks,
+                               office, gateway, ctx_provider):
+        detail = (f"самопроверка не прошла после {MAX_FIX_ITERATIONS} "
+                  f"итераций исправлений")
+        _update(plan_id, status="failed", summary=detail)
+        events.publish("project_failed", agent="kristina", plan_id=plan_id,
+                       detail=detail)
+        return get_plan(plan_id)
+
+    summary = f"все {total} подзадач выполнены, самопроверка зелёная"
     _update(plan_id, status="done", summary=summary)
     events.publish("project_done", agent="kristina", plan_id=plan_id,
                    summary=summary)

@@ -100,10 +100,12 @@ def test_project_runs_subtasks_sequentially_to_done():
     assert kinds == ["plan_created",
                      "subtask_started", "run_started", "subtask_done",
                      "subtask_started", "run_started", "subtask_done",
+                     "verify_started", "verify_passed",
                      "project_done"]
     # Раздача видна: кто взял подзадачу 1 и почему проект завершён.
     assert evts[1]["agent"] == "bjorn"
     assert "2 подзадач" in evts[-1]["payload"]["summary"]
+    assert "самопроверка зелёная" in evts[-1]["payload"]["summary"]
 
 
 def test_failed_subtask_stops_project(monkeypatch):
