@@ -119,6 +119,12 @@ def execute(action: str, target: str, params: dict) -> str:
     """Единственный чокпоинт исполнения. За ним стоит локальный исполнитель
     (файлы/терминал, заперт в корне проекта) либо заглушка без WORKSPACE_ROOT.
     Вызывается только после проверки легальности, полномочий и тира."""
+    if action == "post_note":
+        # Доска решений — внутреннее состояние офиса, а не файлы проекта:
+        # пишется здесь (с провенансом и событием, как всё), мимо исполнителя.
+        import blackboard
+        return blackboard.add(params.get("author") or "office",
+                              params.get("text") or params.get("note") or "")
     return get_executor().run(action, target, params)
 
 
@@ -195,6 +201,9 @@ def propose(req: ProposeRequest) -> ActionView:
 
     tier = spec["tier"]
     requires_approval = TIER_POLICY.get(tier, True)  # неизвестный тир → безопасно требуем одобрения
+    if req.action == "post_note":
+        # Авторство заметки определяет шлюз, не агент: подделать нельзя.
+        req.params = {**req.params, "author": req.agent_id}
     base = {"id": action_id, "agent_id": req.agent_id, "action": req.action,
             "target": req.target, "params": params_json, "tier": tier,
             "provenance_hash": full, "created_at": ts,

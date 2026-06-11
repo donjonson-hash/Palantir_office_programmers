@@ -102,7 +102,9 @@ class Agent:
                 "reason": choice.get("reason", ""), "gateway": result}
 
     # Многошаговый режим: агент видит историю и решает СЛЕДУЮЩИЙ шаг или 'done'.
-    def next_step(self, goal: str, history: list[dict]) -> dict:
+    # context — общая картина проекта от Context Broker (план, доска, файлы).
+    def next_step(self, goal: str, history: list[dict],
+                  context: str = "") -> dict:
         hist = "\n".join(
             f"{i}. {h.get('action')}({h.get('target', '')}) → "
             f"{str(h.get('result', ''))[:300]}"
@@ -110,19 +112,38 @@ class Agent:
         ) or "(пусто)"
         system = LOOP_PROMPT.format(
             name=self.id, role=self.role,
-            actions=", ".join(self.allowed) or "нет", goal=goal, history=hist)
-        return _parse_json(self.llm.complete(system, "Следующий шаг?"))
+            actions=", ".join(self.allowed) or "нет", goal=goal, history=hist,
+            context=context or "(контекст проекта не подключён)")
+        # Мусорный JSON — не приговор: даём LLM до 3 попыток, прежде чем
+        # честно вернуть провал (а не молча завершить задачу).
+        decision: dict = {}
+        for _ in range(3):
+            decision = _parse_json(self.llm.complete(system, "Следующий шаг?"))
+            if not decision.get("_parse_error"):
+                return decision
+        return decision
 
 
-LOOP_PROMPT = """Ты — {name}, {role}. Рабочая цель: {goal}
+LOOP_PROMPT = """Ты — {name}, {role} в команде разработки. Рабочая цель: {goal}
+
+ОБЩАЯ КАРТИНА ПРОЕКТА:
+{context}
+
 Доступные тебе действия (Action Types): {actions}.
-История уже выполненных шагов (действие → итог):
+История уже выполненных ТОБОЙ шагов (действие → итог):
 {history}
+
+Правила команды:
+- Соблюдай контракты с ДОСКИ РЕШЕНИЙ. Принял решение, важное для коллег
+  (формат API, стек, структура папок), — опубликуй его: post_note, params {{"text":"..."}}.
+- Не пересоздавай то, что уже есть в ФАЙЛАХ ПРОЕКТА, — встраивайся.
+- write_file: params {{"path":"<относительный путь>","content":"<полное содержимое файла>"}}.
+
 Реши СЛЕДУЮЩИЙ шаг и ответь строго одним JSON-объектом без пояснений:
 - действие: {{"action":"<имя>","target":"<репозиторий/объект>","params":{{...}},"reason":"<кратко>"}}
 - завершить: {{"done":true,"summary":"<что сделано>"}}
-Учитывай итоги прошлых шагов: если шаг провалился — исправься или заверши;
-не повторяй уже выполненное. Когда цель достигнута — верни done."""
+Учитывай итоги прошлых шагов: если шаг провалился — исправься;
+не повторяй уже выполненное. Когда КРИТЕРИЙ ГОТОВНОСТИ достигнут — верни done."""
 
 
 def _parse_json(text: str) -> dict:
@@ -132,7 +153,8 @@ def _parse_json(text: str) -> dict:
             return json.loads(text[s:e])
         except json.JSONDecodeError:
             pass
-    return {"action": None, "reason": "не удалось разобрать ответ LLM"}
+    return {"action": None, "_parse_error": True,
+            "reason": "не удалось разобрать ответ LLM"}
 
 
 def build_office(llm: LLM, gateway: Gateway,

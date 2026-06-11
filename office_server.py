@@ -17,7 +17,7 @@ import time
 from contextlib import closing
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -25,6 +25,7 @@ from agents import Gateway, build_office, load_roster
 from dispatcher import Dispatcher
 import events
 from llm import OpenAICompatibleLLM
+import planner
 import runner
 
 ONTOLOGY_PATH = os.getenv("ONTOLOGY_PATH", "ontology.yaml")
@@ -171,6 +172,38 @@ def _office_and_gateway():
     disp = get_dispatcher()
     gateway = next(iter(disp.office.values())).gateway
     return disp, gateway
+
+
+# ─── Проекты: «поставил задачу — получил результат» ──────────────────────────
+
+class ProjectRequest(BaseModel):
+    goal: str
+
+
+@app.post("/office/project")
+def start_project(req: ProjectRequest, background: BackgroundTasks) -> dict:
+    """Цель проекта → план Kristina → автономное исполнение в фоне.
+    Ответ возвращается сразу с планом; ход работы — в /office/events."""
+    disp, gateway = _office_and_gateway()
+    workers = {name: disp.office[name].role for name in disp.workers}
+    plan_id = planner.make_plan(req.goal, disp.llm, workers)
+    plan = planner.get_plan(plan_id)
+    if plan["status"] == "planned":
+        background.add_task(planner.run_project, plan_id, disp.office, gateway)
+    return plan
+
+
+@app.get("/office/projects")
+def list_projects() -> dict:
+    return {"projects": planner.list_plans()}
+
+
+@app.get("/office/project/{plan_id}")
+def project_state(plan_id: str) -> dict:
+    try:
+        return planner.get_plan(plan_id)
+    except KeyError:
+        raise HTTPException(404, "Проект не найден")
 
 
 @app.post("/office/run")

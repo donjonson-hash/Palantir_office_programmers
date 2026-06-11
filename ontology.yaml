@@ -15,6 +15,9 @@ ontology:
     - name: PullRequest
       key: pr_id
       properties: [repo, branch, status]
+    - name: Blackboard
+      key: note_id
+      properties: [agent, text]
 
   # ── Политика тиров: ЕДИНСТВЕННОЕ место, где решается, что требует человека ─
   risk_tiers:
@@ -28,6 +31,8 @@ ontology:
   # Тир здесь — закон. Агент не может его переопределить.
   action_types:
     - { name: read_file,     target: Repository,  tier: AUTO }
+    - { name: list_files,    target: Repository,  tier: AUTO }
+    - { name: post_note,     target: Blackboard,  tier: LOW }
     - { name: search_code,   target: Repository,  tier: AUTO }
     - { name: lint,          target: Repository,  tier: AUTO }
     - { name: run_tests,     target: Repository,  tier: LOW }
@@ -45,18 +50,18 @@ ontology:
   agents:
     - name: kristina
       role: "Lead / диспетчер"
-      allowed_actions: [read_file, search_code]
+      allowed_actions: [read_file, search_code, list_files]
     - name: bjorn
       role: "Backend-разработчик"
-      allowed_actions: [read_file, search_code, lint, run_tests, create_branch, write_file, commit, open_pr]
+      allowed_actions: [read_file, list_files, search_code, lint, run_tests, create_branch, write_file, commit, open_pr, post_note]
     - name: elsa
       role: "Frontend-разработчик"
-      allowed_actions: [read_file, search_code, lint, run_tests, create_branch, write_file, commit, open_pr]
+      allowed_actions: [read_file, list_files, search_code, lint, run_tests, create_branch, write_file, commit, open_pr, post_note]
     - name: sven
       role: "DevOps"
       # force_push/deploy/rotate_secret сознательно НЕ выданы: автономному офису
       # «задача → результат» они не нужны, а это единственные необратимые действия.
-      allowed_actions: [read_file, search_code, run_tests, create_branch, merge_pr, delete_branch]
+      allowed_actions: [read_file, list_files, search_code, run_tests, create_branch, merge_pr, delete_branch, post_note]
     - name: ingrid
       role: "QA"
-      allowed_actions: [read_file, search_code, lint, run_tests]
+      allowed_actions: [read_file, list_files, search_code, lint, run_tests, post_note]

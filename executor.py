@@ -89,6 +89,10 @@ class LocalExecutor:
         path = self._resolve(self._param(p, "path", "file", "filename", "_target"))
         return path.read_text(encoding="utf-8", errors="replace")[:MAX_READ_BYTES]
 
+    def _list_files(self, p: dict) -> str:
+        import context
+        return context.file_tree(str(self.root))
+
     def _search_code(self, p: dict) -> str:
         pattern = self._param(p, "pattern", "query", "q")
         hits: list[str] = []

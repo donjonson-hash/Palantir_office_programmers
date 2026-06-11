@@ -22,7 +22,7 @@ from typing import Any
 
 import events
 
-MAX_STEPS = int(os.getenv("MAX_RUN_STEPS", "12"))
+MAX_STEPS = int(os.getenv("MAX_RUN_STEPS", "40"))
 RUN_DB_PATH = os.getenv("RUN_DB_PATH", "office_runs.db")
 
 
@@ -49,6 +49,11 @@ def init_db() -> None:
                    created_at        REAL NOT NULL
                )"""
         )
+        # Миграция: привязка прогона к плану проекта (Этап 3).
+        try:
+            conn.execute("ALTER TABLE runs ADD COLUMN plan_id TEXT")
+        except sqlite3.OperationalError:
+            pass  # колонка уже есть
         conn.commit()
 
 
@@ -79,22 +84,27 @@ def _state(run_id: str) -> dict:
 
 # ─── Жизненный цикл прогона ──────────────────────────────────────────────────
 
-def create_run(goal: str, agent_id: str) -> str:
+def create_run(goal: str, agent_id: str, plan_id: str | None = None) -> str:
     run_id = uuid.uuid4().hex[:12]
     with closing(_db()) as conn:
         conn.execute(
             """INSERT INTO runs (id, goal, agent_id, status, history,
-                                 pending_action_id, steps, summary, created_at)
-               VALUES (:id,:goal,:agent_id,'running','[]',NULL,0,NULL,:ts)""",
-            {"id": run_id, "goal": goal, "agent_id": agent_id, "ts": time.time()},
+                                 pending_action_id, steps, summary, created_at, plan_id)
+               VALUES (:id,:goal,:agent_id,'running','[]',NULL,0,NULL,:ts,:plan_id)""",
+            {"id": run_id, "goal": goal, "agent_id": agent_id,
+             "ts": time.time(), "plan_id": plan_id},
         )
         conn.commit()
-    events.publish("run_started", agent=agent_id, run_id=run_id, goal=goal)
+    events.publish("run_started", agent=agent_id, run_id=run_id, plan_id=plan_id,
+                   goal=goal[:300])
     return run_id
 
 
-def drive(run_id: str, office: dict, gateway: Any) -> dict:
-    """Крутит петлю, пока не done / пауза на одобрении / лимит шагов."""
+def drive(run_id: str, office: dict, gateway: Any,
+          context_provider: Any | None = None) -> dict:
+    """Крутит петлю, пока не done / провал / лимит шагов.
+    context_provider(agent_id) -> str — общая картина проекта (Context Broker);
+    собирается заново на каждом шаге: агент видит свежие файлы/доску/план."""
     row = _get(run_id)
     if row is None:
         raise KeyError(run_id)
@@ -109,13 +119,24 @@ def drive(run_id: str, office: dict, gateway: Any) -> dict:
     steps: int = row["steps"]
 
     while steps < MAX_STEPS:
-        decision = agent.next_step(row["goal"], history)
+        ctx = context_provider(agent.id) if context_provider else ""
+        decision = agent.next_step(row["goal"], history, ctx)
 
-        if decision.get("done") or not decision.get("action"):
+        if decision.get("done"):
             _update(run_id, status="done", history=json.dumps(history, ensure_ascii=False),
                     steps=steps, summary=decision.get("summary", ""))
             events.publish("run_done", agent=agent.id, run_id=run_id,
                            steps=steps, summary=decision.get("summary", ""))
+            return _state(run_id)
+
+        if not decision.get("action"):
+            # Нет действия и нет done — в автономном режиме это провал, а не
+            # успех: «молча объявить готовым» хуже честного отказа.
+            detail = decision.get("reason", "агент не вернул ни действия, ни done")
+            _update(run_id, status="failed", history=json.dumps(history, ensure_ascii=False),
+                    steps=steps, summary=detail)
+            events.publish("run_failed", agent=agent.id, run_id=run_id,
+                           steps=steps, detail=detail)
             return _state(run_id)
 
         gw = gateway.propose(agent.id, decision["action"],
@@ -144,7 +165,8 @@ def drive(run_id: str, office: dict, gateway: Any) -> dict:
     return _state(run_id)
 
 
-def continue_run(run_id: str, office: dict, gateway: Any) -> dict:
+def continue_run(run_id: str, office: dict, gateway: Any,
+                 context_provider: Any | None = None) -> dict:
     """Возобновляет приостановленную задачу после решения человека по действию."""
     row = _get(run_id)
     if row is None:
@@ -161,7 +183,7 @@ def continue_run(run_id: str, office: dict, gateway: Any) -> dict:
                     "result": rec.get("result") or rec["status"], "status": rec["status"]})
     _update(run_id, status="running", history=json.dumps(history, ensure_ascii=False),
             pending_action_id=None)
-    return drive(run_id, office, gateway)
+    return drive(run_id, office, gateway, context_provider)
 
 
 def find_run_by_pending(action_id: str) -> str | None:
