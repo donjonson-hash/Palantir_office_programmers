@@ -107,16 +107,19 @@ class Agent:
     # Многошаговый режим: агент видит историю и решает СЛЕДУЮЩИЙ шаг или 'done'.
     # context — общая картина проекта от Context Broker (план, доска, файлы).
     def next_step(self, goal: str, history: list[dict],
-                  context: str = "") -> dict:
+                  context: str = "", steps_left: int | None = None) -> dict:
         hist = "\n".join(
             f"{i}. {h.get('action')}({h.get('target', '')}) → "
             f"{str(h.get('result', ''))[:300]}"
             for i, h in enumerate(history, 1)
         ) or "(пусто)"
+        budget = (f"ОСТАЛОСЬ ШАГОВ: {steps_left}. Расходуй их на создание "
+                  f"артефактов, а не на перепроверки; при близком нуле — "
+                  f"завершай с done." if steps_left is not None else "")
         system = LOOP_PROMPT.format(
             name=self.id, role=self.role,
             actions=", ".join(self.allowed) or "нет", goal=goal, history=hist,
-            context=context or "(контекст проекта не подключён)")
+            context=context or "(контекст проекта не подключён)", budget=budget)
         # Мусорный JSON — не приговор: даём LLM до 3 попыток, прежде чем
         # честно вернуть провал (а не молча завершить задачу).
         decision: dict = {}
@@ -142,6 +145,7 @@ LOOP_PROMPT = """Ты — {name}, {role} в команде разработки.
 - Не пересоздавай то, что уже есть в ФАЙЛАХ ПРОЕКТА, — встраивайся.
 - write_file: params {{"path":"<относительный путь>","content":"<полное содержимое файла>"}}.
 
+{budget}
 Реши СЛЕДУЮЩИЙ шаг и ответь строго одним JSON-объектом без пояснений:
 - действие: {{"action":"<имя>","target":"<репозиторий/объект>","params":{{...}},"reason":"<кратко>"}}
 - завершить: {{"done":true,"summary":"<что сделано>"}}

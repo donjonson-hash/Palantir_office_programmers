@@ -164,3 +164,13 @@ def test_orchestrator_crash_marks_project_failed(monkeypatch):
     plan = planner.run_project(plan_id, {}, GW)
     assert plan["status"] == "failed"
     assert "диск умер" in plan["summary"]
+
+
+def test_agent_sees_step_budget():
+    from llm import FakeLLM
+    fake = FakeLLM('{"done":true,"summary":"ок"}')
+    office = build_office(fake, GW)
+    run_id = runner.create_run("цель", "bjorn")
+    runner.drive(run_id, office, GW)
+    system_prompt = fake.calls[-1][0]
+    assert "ОСТАЛОСЬ ШАГОВ: " in system_prompt

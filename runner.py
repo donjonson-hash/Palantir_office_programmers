@@ -120,7 +120,8 @@ def drive(run_id: str, office: dict, gateway: Any,
 
     while steps < MAX_STEPS:
         ctx = context_provider(agent.id) if context_provider else ""
-        decision = agent.next_step(row["goal"], history, ctx)
+        decision = agent.next_step(row["goal"], history, ctx,
+                                   steps_left=MAX_STEPS - steps)
 
         if decision.get("done"):
             _update(run_id, status="done", history=json.dumps(history, ensure_ascii=False),
