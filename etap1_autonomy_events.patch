@@ -1,0 +1,691 @@
+diff --git a/action_service.py b/action_service.py
+index 4cb74a9..8e419f7 100644
+--- a/action_service.py
++++ b/action_service.py
+@@ -28,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
+ from pydantic import BaseModel
+ 
+ from executor import get_executor
++import events
+ 
+ ONTOLOGY_PATH = os.getenv("ONTOLOGY_PATH", "ontology.yaml")
+ AUDIT_DB_PATH = os.getenv("AUDIT_DB_PATH", "office_audit.db")
+@@ -138,6 +139,9 @@ class ProposeRequest(BaseModel):
+     action: str
+     target: str
+     params: dict[str, Any] = {}
++    # Наблюдательные поля для «стекла»: не влияют на политику и исполнение.
++    run_id: str | None = None
++    reason: str = ""
+ 
+ 
+ class ActionView(BaseModel):
+@@ -171,6 +175,9 @@ def propose(req: ProposeRequest) -> ActionView:
+                  "target": req.target, "params": params_json, "tier": "UNKNOWN",
+                  "status": "rejected_unknown", "result": None, "provenance_hash": full,
+                  "created_at": ts, "decided_at": ts, "decided_by": "ontology"})
++        events.publish("action_rejected", agent=req.agent_id, run_id=req.run_id,
++                       action=req.action, target=req.target,
++                       detail="действие отсутствует в онтологии")
+         raise HTTPException(422, f"Действие '{req.action}' отсутствует в онтологии")
+ 
+     # Полномочия: неподкупная проверка на шлюзе — агент не может её обойти.
+@@ -181,6 +188,9 @@ def propose(req: ProposeRequest) -> ActionView:
+                  "target": req.target, "params": params_json, "tier": spec["tier"],
+                  "status": "rejected_forbidden", "result": None, "provenance_hash": full,
+                  "created_at": ts, "decided_at": ts, "decided_by": "ontology"})
++        events.publish("action_rejected", agent=req.agent_id, run_id=req.run_id,
++                       action=req.action, target=req.target,
++                       detail="нет полномочий на действие")
+         raise HTTPException(403, f"Агент '{req.agent_id}' не имеет полномочий на '{req.action}'")
+ 
+     tier = spec["tier"]
+@@ -192,6 +202,9 @@ def propose(req: ProposeRequest) -> ActionView:
+ 
+     if requires_approval:
+         _record({**base, "status": "pending"})
++        events.publish("action_pending", agent=req.agent_id, run_id=req.run_id,
++                       action=req.action, target=req.target, tier=tier,
++                       reason=req.reason)
+         return ActionView(id=action_id, agent_id=req.agent_id, action=req.action,
+                           target=req.target, tier=tier, status="pending")
+ 
+@@ -200,10 +213,16 @@ def propose(req: ProposeRequest) -> ActionView:
+     except Exception as e:  # сбой реального исполнителя → failed в провенанс, не 500
+         _record({**base, "status": "failed", "result": str(e),
+                  "decided_at": ts, "decided_by": "auto"})
++        events.publish("action_failed", agent=req.agent_id, run_id=req.run_id,
++                       action=req.action, target=req.target, tier=tier,
++                       reason=req.reason, error=str(e)[:500])
+         return ActionView(id=action_id, agent_id=req.agent_id, action=req.action,
+                           target=req.target, tier=tier, status="failed", result=str(e))
+     _record({**base, "status": "executed", "result": result,
+              "decided_at": ts, "decided_by": "auto"})
++    events.publish("action_executed", agent=req.agent_id, run_id=req.run_id,
++                   action=req.action, target=req.target, tier=tier,
++                   reason=req.reason, result=str(result)[:500])
+     return ActionView(id=action_id, agent_id=req.agent_id, action=req.action,
+                       target=req.target, tier=tier, status="executed", result=result)
+ 
+diff --git a/agents.py b/agents.py
+index d5b5777..f8338f4 100644
+--- a/agents.py
++++ b/agents.py
+@@ -32,10 +32,12 @@ class Gateway:
+         self._client = client
+ 
+     def propose(self, agent_id: str, action: str, target: str,
+-                params: dict[str, Any]) -> dict:
++                params: dict[str, Any], *, run_id: str | None = None,
++                reason: str = "") -> dict:
+         url = f"{self.base_url}/actions/propose"
+         payload = {"agent_id": agent_id, "action": action,
+-                   "target": target, "params": params}
++                   "target": target, "params": params,
++                   "run_id": run_id, "reason": reason}
+         r = (self._client.post(url, json=payload) if self._client
+              else httpx.post(url, json=payload, timeout=30))
+         if r.status_code == 422:
+@@ -94,7 +96,8 @@ class Agent:
+                     "reason": f"'{action}' вне полномочий роли «{self.role}»"}
+ 
+         result = self.gateway.propose(self.id, action,
+-                                      choice.get("target", ""), choice.get("params", {}))
++                                      choice.get("target", ""), choice.get("params", {}),
++                                      reason=choice.get("reason", ""))
+         return {"agent": self.id, "action": action,
+                 "reason": choice.get("reason", ""), "gateway": result}
+ 
+diff --git a/dispatcher.py b/dispatcher.py
+index 3c9c47b..f228a0f 100644
+--- a/dispatcher.py
++++ b/dispatcher.py
+@@ -12,6 +12,7 @@ import json
+ from typing import Any
+ 
+ from agents import Agent
++import events
+ from llm import LLM
+ 
+ ROUTER_SYSTEM = """Ты — Kristina, лид команды разработки. Распредели задачу ОДНОМУ исполнителю.
+@@ -46,8 +47,13 @@ class Dispatcher:
+         choice = _parse_json(self.llm.complete(ROUTER_SYSTEM.format(roster=roster), task))
+         agent = choice.get("agent")
+         if agent in self.workers:
++            events.publish("task_routed", agent="kristina", task=task[:300],
++                           routed_to=agent, reason=choice.get("reason", ""))
+             return agent, choice.get("reason", "")
+-        return self._fallback(task), "fallback по ключевым словам"
++        fallback = self._fallback(task)
++        events.publish("task_routed", agent="kristina", task=task[:300],
++                       routed_to=fallback, reason="fallback по ключевым словам")
++        return fallback, "fallback по ключевым словам"
+ 
+     def _fallback(self, task: str) -> str:
+         low = task.lower()
+diff --git a/events.py b/events.py
+new file mode 100644
+index 0000000..9be8f6b
+--- /dev/null
++++ b/events.py
+@@ -0,0 +1,90 @@
++"""
++События офиса — фундамент «стекла» (наблюдение без вмешательства).
++
++Каждое значимое событие (маршрутизация, шаг агента, исполнение действия,
++завершение прогона) публикуется в единый журнал SQLite. Командный центр
++забирает его поллингом GET /office/events?after=<id>.
++
++Это слой НАБЛЮДЕНИЯ, не контроля: запись событий не влияет на исполнение.
++Сбой публикации не должен ронять рабочую петлю — publish() глотает ошибки
++записи, честно печатая их в stderr.
++"""
++from __future__ import annotations
++
++import json
++import os
++import sqlite3
++import sys
++import time
++from contextlib import closing
++from typing import Any
++
++EVENTS_DB_PATH = os.getenv("EVENTS_DB_PATH", "office_events.db")
++
++# Словарь видов событий (не enforced — справочно для читателя):
++#   task_routed        — Kristina раздала задачу агенту
++#   run_started        — агент взял цель в работу
++#   action_executed    — действие прошло шлюз и исполнено
++#   action_failed      — действие прошло шлюз, но исполнитель упал
++#   action_pending     — действие встало в очередь одобрения (рудимент-страховка)
++#   action_rejected    — шлюз отказал (нет в онтологии / нет полномочий)
++#   run_done           — агент завершил цель
++#   run_stopped        — петля упёрлась в лимит шагов
++#   run_failed         — прогон не удалось вести (нет агента и т.п.)
++
++
++def _db() -> sqlite3.Connection:
++    conn = sqlite3.connect(EVENTS_DB_PATH)
++    conn.row_factory = sqlite3.Row
++    return conn
++
++
++def init_db() -> None:
++    with closing(_db()) as conn:
++        conn.execute(
++            """CREATE TABLE IF NOT EXISTS events (
++                   id      INTEGER PRIMARY KEY AUTOINCREMENT,
++                   ts      REAL NOT NULL,
++                   kind    TEXT NOT NULL,
++                   agent   TEXT,
++                   run_id  TEXT,
++                   plan_id TEXT,
++                   payload TEXT NOT NULL
++               )"""
++        )
++        conn.commit()
++
++
++init_db()
++
++
++def publish(kind: str, *, agent: str | None = None, run_id: str | None = None,
++            plan_id: str | None = None, **payload: Any) -> None:
++    """Опубликовать событие. Никогда не роняет вызывающий код."""
++    try:
++        with closing(_db()) as conn:
++            conn.execute(
++                "INSERT INTO events (ts, kind, agent, run_id, plan_id, payload) "
++                "VALUES (:ts,:kind,:agent,:run_id,:plan_id,:payload)",
++                {"ts": time.time(), "kind": kind, "agent": agent,
++                 "run_id": run_id, "plan_id": plan_id,
++                 "payload": json.dumps(payload, ensure_ascii=False)},
++            )
++            conn.commit()
++    except sqlite3.Error as e:
++        print(f"[events] не удалось записать '{kind}': {e}", file=sys.stderr)
++
++
++def list_events(after: int = 0, limit: int = 200) -> list[dict]:
++    """События с id > after, по возрастанию — курсор для поллинга центра."""
++    with closing(_db()) as conn:
++        rows = conn.execute(
++            "SELECT * FROM events WHERE id > :after ORDER BY id LIMIT :n",
++            {"after": after, "n": limit},
++        ).fetchall()
++    out = []
++    for r in rows:
++        d = dict(r)
++        d["payload"] = json.loads(d["payload"])
++        out.append(d)
++    return out
+diff --git a/office_server.py b/office_server.py
+index b9ce077..c00591a 100644
+--- a/office_server.py
++++ b/office_server.py
+@@ -23,6 +23,7 @@ from pydantic import BaseModel
+ 
+ from agents import Gateway, build_office, load_roster
+ from dispatcher import Dispatcher
++import events
+ from llm import OpenAICompatibleLLM
+ import runner
+ 
+@@ -129,6 +130,13 @@ def list_tasks(limit: int = 50) -> dict:
+     return {"tasks": [dict(r) for r in rows]}
+ 
+ 
++@app.get("/office/events")
++def office_events(after: int = 0, limit: int = 200) -> dict:
++    """Лента событий офиса («стекло»). Центр поллит с курсором after=<id>."""
++    evts = events.list_events(after=after, limit=limit)
++    return {"events": evts, "last_id": evts[-1]["id"] if evts else after}
++
++
+ @app.get("/office/agents")
+ def list_agents() -> dict:
+     roster = load_roster(ONTOLOGY_PATH)
+diff --git a/ontology.yaml b/ontology.yaml
+index ed53084..0444c7d 100644
+--- a/ontology.yaml
++++ b/ontology.yaml
+@@ -21,8 +21,8 @@ ontology:
+     AUTO:     { requires_approval: false, description: "Чтение/поиск — не меняет состояние" }
+     LOW:      { requires_approval: false, description: "Обратимо и дёшево" }
+     MEDIUM:   { requires_approval: false, description: "Изменения в рабочей ветке, обратимо через git" }
+-    HIGH:     { requires_approval: true,  description: "Влияет на общую ветку или историю" }
+-    CRITICAL: { requires_approval: true,  description: "Необратимо либо затрагивает прод/секреты" }
++    HIGH:     { requires_approval: false, description: "Влияет на общую ветку; авто в режиме автономии, обратимо через git" }
++    CRITICAL: { requires_approval: true,  description: "Необратимо либо затрагивает прод/секреты; в автономном офисе никому не разрешено" }
+ 
+   # ── Каталог Действий: ЕДИНСТВЕННЫЙ список того, что агент может предложить ──
+   # Тир здесь — закон. Агент не может его переопределить.
+@@ -54,7 +54,9 @@ ontology:
+       allowed_actions: [read_file, search_code, lint, run_tests, create_branch, write_file, commit, open_pr]
+     - name: sven
+       role: "DevOps"
+-      allowed_actions: [read_file, search_code, run_tests, create_branch, merge_pr, delete_branch, force_push, deploy, rotate_secret]
++      # force_push/deploy/rotate_secret сознательно НЕ выданы: автономному офису
++      # «задача → результат» они не нужны, а это единственные необратимые действия.
++      allowed_actions: [read_file, search_code, run_tests, create_branch, merge_pr, delete_branch]
+     - name: ingrid
+       role: "QA"
+       allowed_actions: [read_file, search_code, lint, run_tests]
+diff --git a/runner.py b/runner.py
+index 3ded2e0..a59e9b3 100644
+--- a/runner.py
++++ b/runner.py
+@@ -20,6 +20,8 @@ import uuid
+ from contextlib import closing
+ from typing import Any
+ 
++import events
++
+ MAX_STEPS = int(os.getenv("MAX_RUN_STEPS", "12"))
+ RUN_DB_PATH = os.getenv("RUN_DB_PATH", "office_runs.db")
+ 
+@@ -87,6 +89,7 @@ def create_run(goal: str, agent_id: str) -> str:
+             {"id": run_id, "goal": goal, "agent_id": agent_id, "ts": time.time()},
+         )
+         conn.commit()
++    events.publish("run_started", agent=agent_id, run_id=run_id, goal=goal)
+     return run_id
+ 
+ 
+@@ -98,6 +101,8 @@ def drive(run_id: str, office: dict, gateway: Any) -> dict:
+     agent = office.get(row["agent_id"])
+     if agent is None:
+         _update(run_id, status="failed", summary=f"нет агента {row['agent_id']}")
++        events.publish("run_failed", agent=row["agent_id"], run_id=run_id,
++                       detail=f"нет агента {row['agent_id']}")
+         return _state(run_id)
+ 
+     history: list[dict] = json.loads(row["history"])
+@@ -109,10 +114,13 @@ def drive(run_id: str, office: dict, gateway: Any) -> dict:
+         if decision.get("done") or not decision.get("action"):
+             _update(run_id, status="done", history=json.dumps(history, ensure_ascii=False),
+                     steps=steps, summary=decision.get("summary", ""))
++            events.publish("run_done", agent=agent.id, run_id=run_id,
++                           steps=steps, summary=decision.get("summary", ""))
+             return _state(run_id)
+ 
+         gw = gateway.propose(agent.id, decision["action"],
+-                             decision.get("target", ""), decision.get("params", {}))
++                             decision.get("target", ""), decision.get("params", {}),
++                             run_id=run_id, reason=decision.get("reason", ""))
+         steps += 1
+         status = gw.get("status")
+ 
+@@ -131,6 +139,8 @@ def drive(run_id: str, office: dict, gateway: Any) -> dict:
+ 
+     _update(run_id, status="stopped", history=json.dumps(history, ensure_ascii=False),
+             steps=steps, summary=f"достигнут лимит шагов ({MAX_STEPS})")
++    events.publish("run_stopped", agent=agent.id, run_id=run_id,
++                   steps=steps, detail=f"достигнут лимит шагов ({MAX_STEPS})")
+     return _state(run_id)
+ 
+ 
+diff --git a/test_action_service.py b/test_action_service.py
+index ef9a052..7e3200f 100644
+--- a/test_action_service.py
++++ b/test_action_service.py
+@@ -11,6 +11,9 @@ os.environ["ONTOLOGY_PATH"] = str(ROOT / "ontology.yaml")
+ _tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+ _tmp.close()
+ os.environ["AUDIT_DB_PATH"] = _tmp.name
++_tmp2 = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
++_tmp2.close()
++os.environ["EVENTS_DB_PATH"] = _tmp2.name
+ 
+ from fastapi.testclient import TestClient  # noqa: E402
+ import action_service  # noqa: E402
+@@ -35,7 +38,19 @@ def test_auto_action_executes_immediately():
+     assert r.json()["status"] == "executed"
+ 
+ 
+-def test_critical_action_requires_human_approval():
++def test_critical_actions_removed_from_staff():
++    # Автономный офис: необратимые действия (deploy/force_push/rotate_secret)
++    # никому не выданы — шлюз отказывает даже DevOps.
++    r = client.post("/actions/propose", json={
++        "agent_id": "sven", "action": "deploy", "target": "syndi-vercel"})
++    assert r.status_code == 403
++
++
++def test_approval_mechanism_preserved_as_safety_net(monkeypatch):
++    # Механизм очереди одобрений остаётся в коде как страховка: если CRITICAL
++    # действие когда-нибудь выдадут роли — оно встанет в pending, а не исполнится.
++    monkeypatch.setitem(action_service.AGENT_PERMISSIONS, "sven",
++                        action_service.AGENT_PERMISSIONS["sven"] | {"deploy"})
+     r = client.post("/actions/propose", json={
+         "agent_id": "sven", "action": "deploy", "target": "syndi-vercel"})
+     body = r.json()
+@@ -53,13 +68,13 @@ def test_unknown_action_is_rejected():
+ 
+ def test_agent_cannot_set_its_own_tier():
+     # Агент подсовывает requires_approval=false в params — поле игнорируется.
+-    # merge_pr — тир HIGH в онтологии → всё равно очередь на одобрение.
+-    # (sven вправе делать merge_pr; полномочия проверяются отдельно.)
++    # Тир берётся ИЗ онтологии (merge_pr → HIGH), а не из предложения агента.
++    # В автономной политике HIGH исполняется сразу, но тир в провенансе честный.
+     r = client.post("/actions/propose", json={
+         "agent_id": "sven", "action": "merge_pr", "target": "PR-42",
+         "params": {"requires_approval": False}})
+     assert r.json()["tier"] == "HIGH"
+-    assert r.json()["status"] == "pending"
++    assert r.json()["status"] == "executed"
+ 
+ 
+ def test_gateway_enforces_permissions_even_if_agent_bypasses_guard():
+@@ -79,10 +94,11 @@ def test_unknown_agent_is_denied():
+     assert r.status_code == 403
+ 
+ 
+-def test_write_file_requires_approval():
+-    # Замок: запись файлов — тир HIGH, исполняется только после человека.
++def test_write_file_executes_autonomously():
++    # Автономный офис: запись файлов (HIGH) исполняется без человека,
++    # но тир и след остаются в провенансе.
+     r = client.post("/actions/propose", json={
+         "agent_id": "bjorn", "action": "write_file", "target": "syndi-vercel",
+         "params": {"path": "x.txt", "content": "y"}})
+     assert r.json()["tier"] == "HIGH"
+-    assert r.json()["status"] == "pending"
++    assert r.json()["status"] == "executed"
+diff --git a/test_agents.py b/test_agents.py
+index 61bf7ad..bd6da98 100644
+--- a/test_agents.py
++++ b/test_agents.py
+@@ -11,6 +11,9 @@ os.environ["ONTOLOGY_PATH"] = str(ROOT / "ontology.yaml")
+ _tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+ _tmp.close()
+ os.environ["AUDIT_DB_PATH"] = _tmp.name
++_tmp2 = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
++_tmp2.close()
++os.environ["EVENTS_DB_PATH"] = _tmp2.name
+ 
+ from fastapi.testclient import TestClient  # noqa: E402
+ import action_service  # noqa: E402
+@@ -41,12 +44,13 @@ def test_agent_proposes_auto_action_through_gateway():
+     assert out["gateway"]["status"] == "executed"
+ 
+ 
+-def test_risky_action_goes_to_approval_queue():
++def test_irreversible_action_blocked_by_role_guard():
++    # Автономный офис: deploy выведен из полномочий sven — предохранитель
++    # роли останавливает действие ещё до шлюза.
+     office = office_with(
+         '{"action":"deploy","target":"syndi-vercel","params":{},"reason":"релиз"}')
+     out = office["sven"].act("выкати на прод")
+-    assert out["gateway"]["tier"] == "CRITICAL"
+-    assert out["gateway"]["status"] == "pending"   # человек одобрит из центра
++    assert out["status"] == "forbidden"
+ 
+ 
+ def test_agent_cannot_propose_outside_its_role():
+diff --git a/test_dispatcher.py b/test_dispatcher.py
+index b0a27c2..070c96d 100644
+--- a/test_dispatcher.py
++++ b/test_dispatcher.py
+@@ -11,6 +11,9 @@ os.environ["ONTOLOGY_PATH"] = str(ROOT / "ontology.yaml")
+ _tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+ _tmp.close()
+ os.environ["AUDIT_DB_PATH"] = _tmp.name
++_tmp2 = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
++_tmp2.close()
++os.environ["EVENTS_DB_PATH"] = _tmp2.name
+ 
+ from fastapi.testclient import TestClient  # noqa: E402
+ import action_service  # noqa: E402
+@@ -28,13 +31,24 @@ def make(action_json: str, routing_json: str, default: str = "bjorn") -> Dispatc
+ 
+ 
+ def test_routes_to_chosen_agent_and_proposes_end_to_end():
++    d = make(
++        action_json='{"action":"run_tests","target":"syndi-vercel","params":{},"reason":"проверка"}',
++        routing_json='{"agent":"ingrid","reason":"это QA"}')
++    out = d.handle("прогони тесты")
++    assert out["routed_to"] == "ingrid"
++    assert out["result"]["gateway"]["tier"] == "LOW"
++    assert out["result"]["gateway"]["status"] == "executed"
++
++
++def test_irreversible_action_stopped_even_through_dispatcher():
++    # Деплой не выдан никому: даже корректно смаршрутизированная задача
++    # упирается в предохранитель роли — необратимое не исполняется.
+     d = make(
+         action_json='{"action":"deploy","target":"syndi-vercel","params":{},"reason":"релиз"}',
+         routing_json='{"agent":"sven","reason":"это деплой"}')
+     out = d.handle("выкати свежую версию на прод")
+     assert out["routed_to"] == "sven"
+-    assert out["result"]["gateway"]["tier"] == "CRITICAL"
+-    assert out["result"]["gateway"]["status"] == "pending"
++    assert out["result"]["status"] == "forbidden"
+ 
+ 
+ def test_fallback_when_llm_returns_garbage():
+diff --git a/test_events.py b/test_events.py
+new file mode 100644
+index 0000000..5e01c62
+--- /dev/null
++++ b/test_events.py
+@@ -0,0 +1,94 @@
++"""
++Тесты «стекла»: события публикуются на каждом значимом шаге и читаются курсором.
++Запуск:  cd office && python -m pytest -q
++"""
++import os
++import pathlib
++import tempfile
++
++ROOT = pathlib.Path(__file__).parent
++os.environ["ONTOLOGY_PATH"] = str(ROOT / "ontology.yaml")
++for var in ("AUDIT_DB_PATH", "RUN_DB_PATH", "EVENTS_DB_PATH", "OFFICE_DB_PATH"):
++    f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
++    f.close()
++    os.environ[var] = f.name
++
++from fastapi.testclient import TestClient  # noqa: E402
++import pytest  # noqa: E402
++import action_service  # noqa: E402
++import events  # noqa: E402
++import office_server  # noqa: E402
++import runner  # noqa: E402
++from agents import Gateway, build_office  # noqa: E402
++from llm import ScriptedLLM  # noqa: E402
++
++GW = Gateway(base_url="", client=TestClient(action_service.app))
++office = TestClient(office_server.app)
++
++
++@pytest.fixture(autouse=True)
++def _stub_executor(monkeypatch):
++    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
++
++
++def _cursor() -> int:
++    evts = events.list_events(after=0, limit=10_000)
++    return evts[-1]["id"] if evts else 0
++
++
++def test_publish_and_cursor_pagination():
++    start = _cursor()
++    events.publish("run_started", agent="bjorn", run_id="r1", goal="тест")
++    events.publish("action_executed", agent="bjorn", run_id="r1", action="read_file")
++    evts = events.list_events(after=start)
++    assert [e["kind"] for e in evts] == ["run_started", "action_executed"]
++    # Курсор: после последнего id — пусто.
++    assert events.list_events(after=evts[-1]["id"]) == []
++
++
++def test_run_produces_full_event_chain():
++    # Прогон: read_file → write_file → done. В ленте должна быть вся цепочка,
++    # скоррелированная по run_id, с reason каждого шага.
++    start = _cursor()
++    office_agents = build_office(ScriptedLLM([
++        '{"action":"read_file","target":"repo","params":{"path":"a"},"reason":"осмотреться"}',
++        '{"action":"write_file","target":"repo","params":{"path":"b","content":"c"},"reason":"правка"}',
++        '{"done":true,"summary":"готово"}',
++    ]), GW)
++    run_id = runner.create_run("сделай правку", "bjorn")
++    st = runner.drive(run_id, office_agents, GW)
++    assert st["status"] == "done"
++
++    evts = [e for e in events.list_events(after=start) if e["run_id"] == run_id]
++    kinds = [e["kind"] for e in evts]
++    assert kinds == ["run_started", "action_executed", "action_executed", "run_done"]
++    # Видно ЧТО и ПОЧЕМУ делал агент — это и есть «стекло».
++    write_evt = evts[2]
++    assert write_evt["agent"] == "bjorn"
++    assert write_evt["payload"]["action"] == "write_file"
++    assert write_evt["payload"]["reason"] == "правка"
++    assert evts[3]["payload"]["summary"] == "готово"
++
++
++def test_failed_action_is_visible_in_feed(monkeypatch):
++    # Сбой исполнителя не теряется: в ленте появляется action_failed с ошибкой.
++    start = _cursor()
++    monkeypatch.setattr(action_service, "execute",
++                        lambda a, t, p: (_ for _ in ()).throw(RuntimeError("диск полон")))
++    GW.propose("bjorn", "write_file", "repo", {"path": "x", "content": "y"},
++               run_id="rfail", reason="попытка")
++    evts = [e for e in events.list_events(after=start) if e["run_id"] == "rfail"]
++    assert evts[0]["kind"] == "action_failed"
++    assert "диск полон" in evts[0]["payload"]["error"]
++
++
++def test_office_events_endpoint_polls_with_cursor():
++    start = _cursor()
++    events.publish("task_routed", agent="kristina", routed_to="elsa", reason="ui")
++    body = office.get(f"/office/events?after={start}").json()
++    assert body["events"][-1]["kind"] == "task_routed"
++    assert body["last_id"] > start
++    # Повторный поллинг с новым курсором — без дублей.
++    again = office.get(f"/office/events?after={body['last_id']}").json()
++    assert again["events"] == []
++    assert again["last_id"] == body["last_id"]
+diff --git a/test_executor.py b/test_executor.py
+index 2c21e1b..a39aad2 100644
+--- a/test_executor.py
++++ b/test_executor.py
+@@ -14,6 +14,9 @@ os.environ["ONTOLOGY_PATH"] = str(ROOT / "ontology.yaml")
+ _audit = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+ _audit.close()
+ os.environ["AUDIT_DB_PATH"] = _audit.name
++_events = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
++_events.close()
++os.environ["EVENTS_DB_PATH"] = _events.name
+ 
+ from executor import LocalExecutor, StubExecutor, get_executor  # noqa: E402
+ 
+@@ -72,7 +75,8 @@ def test_factory_defaults_to_stub_without_workspace(monkeypatch):
+ 
+ 
+ def test_gateway_executes_through_local_executor(repo, monkeypatch):
+-    # write_file теперь HIGH: предложение → pending → одобрение человека → запись.
++    # Автономная политика: write_file (HIGH) проходит шлюз и пишется сразу,
++    # след остаётся в провенансе и ленте событий.
+     monkeypatch.setenv("WORKSPACE_ROOT", str(repo))
+     from fastapi.testclient import TestClient
+     import action_service
+@@ -81,10 +85,7 @@ def test_gateway_executes_through_local_executor(repo, monkeypatch):
+         "agent_id": "bjorn", "action": "write_file", "target": repo.name,
+         "params": {"path": "from_gateway.txt", "content": "через шлюз"}})
+     body = r.json()
+-    assert body["status"] == "pending"                       # не записалось само
+-    assert not (repo / "from_gateway.txt").exists()
+-    a = client.post(f"/actions/{body['id']}/approve", params={"approver": "don"})
+-    assert a.json()["status"] == "executed"                  # записалось после человека
++    assert body["status"] == "executed"
+     assert (repo / "from_gateway.txt").read_text(encoding="utf-8") == "через шлюз"
+ 
+ 
+diff --git a/test_office_server.py b/test_office_server.py
+index f65bdc2..93eb032 100644
+--- a/test_office_server.py
++++ b/test_office_server.py
+@@ -8,7 +8,7 @@ import tempfile
+ 
+ ROOT = pathlib.Path(__file__).parent
+ os.environ["ONTOLOGY_PATH"] = str(ROOT / "ontology.yaml")
+-for var in ("AUDIT_DB_PATH", "OFFICE_DB_PATH"):
++for var in ("AUDIT_DB_PATH", "OFFICE_DB_PATH", "EVENTS_DB_PATH"):
+     f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+     f.close()
+     os.environ[var] = f.name
+@@ -44,20 +44,22 @@ def test_submit_task_routes_and_proposes():
+ 
+ 
+ def test_task_is_logged_and_listable():
++    # Автономный офис: deploy выведен из полномочий sven — агент-side
++    # предохранитель отказывает ещё до шлюза, и это видно в журнале.
+     _inject('{"action":"deploy","target":"syndi-vercel","params":{},"reason":"релиз"}',
+             '{"agent":"sven","reason":"деплой"}')
+     out = office.post("/office/task", json={"task": "выкати на прод"}).json()
+     tasks = office.get("/office/tasks").json()["tasks"]
+     rec = next(t for t in tasks if t["id"] == out["task_id"])
+     assert rec["routed_to"] == "sven"
+-    assert rec["action"] == "deploy"
+-    assert rec["status"] == "pending"   # CRITICAL → ждёт одобрения
++    assert rec["status"] == "forbidden"   # необратимое действие никому не выдано
+ 
+ 
+ def test_ontology_mirror_exposes_policy():
+     o = office.get("/office/ontology").json()
+     # тиры, каталог действий и штат видны центру
+-    assert "HIGH" in o["risk_tiers"] and o["risk_tiers"]["HIGH"]["requires_approval"] is True
++    assert "HIGH" in o["risk_tiers"] and o["risk_tiers"]["HIGH"]["requires_approval"] is False
++    assert o["risk_tiers"]["CRITICAL"]["requires_approval"] is True
+     names = {a["name"] for a in o["action_types"]}
+     assert {"write_file", "deploy", "read_file"} <= names
+     wf = next(a for a in o["action_types"] if a["name"] == "write_file")
+diff --git a/test_runner.py b/test_runner.py
+index 749f15b..a10a223 100644
+--- a/test_runner.py
++++ b/test_runner.py
+@@ -8,7 +8,7 @@ import tempfile
+ 
+ ROOT = pathlib.Path(__file__).parent
+ os.environ["ONTOLOGY_PATH"] = str(ROOT / "ontology.yaml")
+-for var in ("AUDIT_DB_PATH", "RUN_DB_PATH"):
++for var in ("AUDIT_DB_PATH", "RUN_DB_PATH", "EVENTS_DB_PATH"):
+     f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+     f.close()
+     os.environ[var] = f.name
+@@ -32,7 +32,23 @@ def office_running(script):
+     return build_office(ScriptedLLM(script), GW)
+ 
+ 
+-def test_loop_pauses_on_high_then_resumes_to_done():
++def test_loop_runs_high_autonomously():
++    # Автономная политика: write_file (HIGH) исполняется без паузы, петля идёт до done.
++    office = office_running([
++        '{"action":"write_file","target":"repo","params":{"path":"b","content":"c"},"reason":"правка"}',
++        '{"done":true,"summary":"готово"}',
++    ])
++    run_id = runner.create_run("автономная правка", "bjorn")
++    st = runner.drive(run_id, office, GW)
++    assert st["status"] == "done"
++    assert st["history"][0]["action"] == "write_file"
++    assert st["history"][0]["status"] == "executed"
++
++
++def test_loop_pauses_on_gated_tier_then_resumes_to_done(monkeypatch):
++    # Механизм паузы сохранён как страховка: если тиру вернуть requires_approval,
++    # петля встанет и возобновится после решения человека.
++    monkeypatch.setitem(action_service.TIER_POLICY, "HIGH", True)
+     # read_file (AUTO, авто) → write_file (HIGH, пауза) → [человек одобрил] → done
+     office = office_running([
+         '{"action":"read_file","target":"repo","params":{"path":"a"},"reason":"посмотреть"}',
+@@ -55,8 +71,9 @@ def test_loop_pauses_on_high_then_resumes_to_done():
+     assert actions == ["read_file", "write_file"]
+ 
+ 
+-def test_reject_lets_agent_finish():
+-    # write_file (HIGH) → [человек отклонил] → агент видит отказ и завершает
++def test_reject_lets_agent_finish(monkeypatch):
++    # write_file (HIGH, гейт включён страховкой) → [отклонил] → агент завершает
++    monkeypatch.setitem(action_service.TIER_POLICY, "HIGH", True)
+     office = office_running([
+         '{"action":"write_file","target":"repo","params":{"path":"b","content":"c"},"reason":"правка"}',
+         '{"done":true,"summary":"остановлено по отказу"}',

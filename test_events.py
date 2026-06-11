@@ -92,3 +92,10 @@ def test_office_events_endpoint_polls_with_cursor():
     again = office.get(f"/office/events?after={body['last_id']}").json()
     assert again["events"] == []
     assert again["last_id"] == body["last_id"]
+
+
+def test_notes_endpoint_exposes_blackboard():
+    import blackboard
+    blackboard.add("bjorn", "контракт: GET /api/x")
+    notes = office.get("/office/notes").json()["notes"]
+    assert any("GET /api/x" in n["text"] and n["agent"] == "bjorn" for n in notes)

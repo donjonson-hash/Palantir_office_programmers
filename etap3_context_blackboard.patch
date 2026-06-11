@@ -1,0 +1,647 @@
+diff --git a/action_service.py b/action_service.py
+index 8e419f7..6370aa2 100644
+--- a/action_service.py
++++ b/action_service.py
+@@ -119,6 +119,12 @@ def execute(action: str, target: str, params: dict) -> str:
+     """Единственный чокпоинт исполнения. За ним стоит локальный исполнитель
+     (файлы/терминал, заперт в корне проекта) либо заглушка без WORKSPACE_ROOT.
+     Вызывается только после проверки легальности, полномочий и тира."""
++    if action == "post_note":
++        # Доска решений — внутреннее состояние офиса, а не файлы проекта:
++        # пишется здесь (с провенансом и событием, как всё), мимо исполнителя.
++        import blackboard
++        return blackboard.add(params.get("author") or "office",
++                              params.get("text") or params.get("note") or "")
+     return get_executor().run(action, target, params)
+ 
+ 
+@@ -195,6 +201,9 @@ def propose(req: ProposeRequest) -> ActionView:
+ 
+     tier = spec["tier"]
+     requires_approval = TIER_POLICY.get(tier, True)  # неизвестный тир → безопасно требуем одобрения
++    if req.action == "post_note":
++        # Авторство заметки определяет шлюз, не агент: подделать нельзя.
++        req.params = {**req.params, "author": req.agent_id}
+     base = {"id": action_id, "agent_id": req.agent_id, "action": req.action,
+             "target": req.target, "params": params_json, "tier": tier,
+             "provenance_hash": full, "created_at": ts,
+diff --git a/agents.py b/agents.py
+index f8338f4..16d74bf 100644
+--- a/agents.py
++++ b/agents.py
+@@ -102,7 +102,9 @@ class Agent:
+                 "reason": choice.get("reason", ""), "gateway": result}
+ 
+     # Многошаговый режим: агент видит историю и решает СЛЕДУЮЩИЙ шаг или 'done'.
+-    def next_step(self, goal: str, history: list[dict]) -> dict:
++    # context — общая картина проекта от Context Broker (план, доска, файлы).
++    def next_step(self, goal: str, history: list[dict],
++                  context: str = "") -> dict:
+         hist = "\n".join(
+             f"{i}. {h.get('action')}({h.get('target', '')}) → "
+             f"{str(h.get('result', ''))[:300]}"
+@@ -110,19 +112,38 @@ class Agent:
+         ) or "(пусто)"
+         system = LOOP_PROMPT.format(
+             name=self.id, role=self.role,
+-            actions=", ".join(self.allowed) or "нет", goal=goal, history=hist)
+-        return _parse_json(self.llm.complete(system, "Следующий шаг?"))
++            actions=", ".join(self.allowed) or "нет", goal=goal, history=hist,
++            context=context or "(контекст проекта не подключён)")
++        # Мусорный JSON — не приговор: даём LLM до 3 попыток, прежде чем
++        # честно вернуть провал (а не молча завершить задачу).
++        decision: dict = {}
++        for _ in range(3):
++            decision = _parse_json(self.llm.complete(system, "Следующий шаг?"))
++            if not decision.get("_parse_error"):
++                return decision
++        return decision
+ 
+ 
+-LOOP_PROMPT = """Ты — {name}, {role}. Рабочая цель: {goal}
++LOOP_PROMPT = """Ты — {name}, {role} в команде разработки. Рабочая цель: {goal}
++
++ОБЩАЯ КАРТИНА ПРОЕКТА:
++{context}
++
+ Доступные тебе действия (Action Types): {actions}.
+-История уже выполненных шагов (действие → итог):
++История уже выполненных ТОБОЙ шагов (действие → итог):
+ {history}
++
++Правила команды:
++- Соблюдай контракты с ДОСКИ РЕШЕНИЙ. Принял решение, важное для коллег
++  (формат API, стек, структура папок), — опубликуй его: post_note, params {{"text":"..."}}.
++- Не пересоздавай то, что уже есть в ФАЙЛАХ ПРОЕКТА, — встраивайся.
++- write_file: params {{"path":"<относительный путь>","content":"<полное содержимое файла>"}}.
++
+ Реши СЛЕДУЮЩИЙ шаг и ответь строго одним JSON-объектом без пояснений:
+ - действие: {{"action":"<имя>","target":"<репозиторий/объект>","params":{{...}},"reason":"<кратко>"}}
+ - завершить: {{"done":true,"summary":"<что сделано>"}}
+-Учитывай итоги прошлых шагов: если шаг провалился — исправься или заверши;
+-не повторяй уже выполненное. Когда цель достигнута — верни done."""
++Учитывай итоги прошлых шагов: если шаг провалился — исправься;
++не повторяй уже выполненное. Когда КРИТЕРИЙ ГОТОВНОСТИ достигнут — верни done."""
+ 
+ 
+ def _parse_json(text: str) -> dict:
+@@ -132,7 +153,8 @@ def _parse_json(text: str) -> dict:
+             return json.loads(text[s:e])
+         except json.JSONDecodeError:
+             pass
+-    return {"action": None, "reason": "не удалось разобрать ответ LLM"}
++    return {"action": None, "_parse_error": True,
++            "reason": "не удалось разобрать ответ LLM"}
+ 
+ 
+ def build_office(llm: LLM, gateway: Gateway,
+diff --git a/blackboard.py b/blackboard.py
+new file mode 100644
+index 0000000..f88d8c9
+--- /dev/null
++++ b/blackboard.py
+@@ -0,0 +1,71 @@
++"""
++Blackboard — доска решений команды (классический паттерн multi-agent систем).
++
++Агенты публикуют сюда КОНТРАКТНЫЕ решения, обязательные для всей команды:
++выбранный стек, формат API («POST /api/research принимает {topic} ...»),
++структуру папок, соглашения об именовании. Сосед строит работу под контракт
++с доски, а не под выдуманный.
++
++Запись идёт через шлюз (действие post_note, LOW) — с провенансом и событием,
++как всё в офисе. Чтение — через Context Broker: заметки попадают в промпт
++каждого агента на каждом шаге.
++
++Заметки глобальны для офиса (проекты исполняются последовательно). Если офис
++когда-нибудь поведёт несколько проектов параллельно — добавить scope по plan_id.
++"""
++from __future__ import annotations
++
++import os
++import sqlite3
++import time
++from contextlib import closing
++
++NOTES_DB_PATH = os.getenv("NOTES_DB_PATH", "office_notes.db")
++MAX_NOTE_LEN = 2000
++
++
++def _db() -> sqlite3.Connection:
++    conn = sqlite3.connect(NOTES_DB_PATH)
++    conn.row_factory = sqlite3.Row
++    return conn
++
++
++def init_db() -> None:
++    with closing(_db()) as conn:
++        conn.execute(
++            """CREATE TABLE IF NOT EXISTS notes (
++                   id    INTEGER PRIMARY KEY AUTOINCREMENT,
++                   ts    REAL NOT NULL,
++                   agent TEXT NOT NULL,
++                   text  TEXT NOT NULL
++               )"""
++        )
++        conn.commit()
++
++
++init_db()
++
++
++def add(agent: str, text: str) -> str:
++    text = str(text)[:MAX_NOTE_LEN]
++    if not text.strip():
++        raise ValueError("пустая заметка")
++    with closing(_db()) as conn:
++        conn.execute("INSERT INTO notes (ts, agent, text) VALUES (:ts,:agent,:text)",
++                     {"ts": time.time(), "agent": agent, "text": text})
++        conn.commit()
++    return f"заметка опубликована на доске ({agent})"
++
++
++def list_notes(limit: int = 100) -> list[dict]:
++    with closing(_db()) as conn:
++        rows = conn.execute(
++            "SELECT * FROM notes ORDER BY id LIMIT :n", {"n": limit}).fetchall()
++    return [dict(r) for r in rows]
++
++
++def clear() -> None:
++    """Очистка доски (используется оркестратором при старте нового проекта)."""
++    with closing(_db()) as conn:
++        conn.execute("DELETE FROM notes")
++        conn.commit()
+diff --git a/context.py b/context.py
+new file mode 100644
+index 0000000..4fcf299
+--- /dev/null
++++ b/context.py
+@@ -0,0 +1,93 @@
++"""
++Context Broker — сборщик общей картины для агента.
++
++Лечит главную болезнь multi-agent систем: туннельное зрение. Перед КАЖДЫМ
++шагом агент получает не только свою подзадачу, но и:
++  1) весь план со статусами — кто над чем работает, что уже готово;
++  2) доску решений (blackboard) — контракты, обязательные для команды;
++  3) дерево файлов workspace — что физически уже создано соседями;
++  4) последние действия других агентов — что произошло только что.
++
++Бюджет токенов: дерево ≤ MAX_TREE_ENTRIES записей, события ≤ MAX_PEER_EVENTS,
++заметки целиком (они короткие и важные).
++"""
++from __future__ import annotations
++
++import os
++from pathlib import Path
++
++import blackboard
++import events
++
++MAX_TREE_ENTRIES = int(os.getenv("CTX_MAX_TREE", "200"))
++MAX_PEER_EVENTS = int(os.getenv("CTX_MAX_EVENTS", "8"))
++SKIP_DIRS = {"node_modules", ".git", ".next", "dist", "build",
++             "venv", ".venv", "__pycache__", ".turbo"}
++
++
++def file_tree(root: str | None = None) -> str:
++    """Дерево файлов workspace (только чтение, мимо шлюза — это наблюдение)."""
++    root = root or os.getenv("WORKSPACE_ROOT", "")
++    if not root or not Path(root).is_dir():
++        return "(workspace пуст или не подключён)"
++    base = Path(root).resolve()
++    lines: list[str] = []
++
++    def _add(line: str) -> bool:
++        if len(lines) >= MAX_TREE_ENTRIES:
++            lines.append("… (обрезано)")
++            return False
++        lines.append(line)
++        return True
++
++    for dirpath, dirnames, filenames in os.walk(base):
++        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
++        rel = Path(dirpath).relative_to(base)
++        depth = 0 if rel == Path(".") else len(rel.parts)
++        if depth and not _add("  " * (depth - 1) + f"{rel.parts[-1]}/"):
++            return "\n".join(lines)
++        for f in sorted(filenames):
++            if not _add("  " * depth + f):
++                return "\n".join(lines)
++    return "\n".join(lines) or "(workspace пуст)"
++
++
++def _plan_overview(plan_id: str) -> str:
++    import planner  # ленивый импорт: planner сам пользуется этим модулем
++    try:
++        plan = planner.get_plan(plan_id)
++    except KeyError:
++        return "(план недоступен)"
++    rows = [f"ЦЕЛЬ ПРОЕКТА: {plan['goal']}"]
++    for st in plan["subtasks"]:
++        rows.append(f"  {st['n']}. [{st['status']}] {st['agent']}: {st['title']}"
++                    f" — критерий: {st['acceptance'] or '—'}")
++    return "\n".join(rows)
++
++
++def _notes_block() -> str:
++    notes = blackboard.list_notes()
++    if not notes:
++        return "(доска пуста — публикуй контракты через post_note)"
++    return "\n".join(f"- [{n['agent']}] {n['text']}" for n in notes)
++
++
++def _peer_activity(agent_id: str) -> str:
++    recent = events.list_events(after=0, limit=100_000)[-60:]
++    peer = [e for e in recent
++            if e["kind"] == "action_executed" and e["agent"] != agent_id]
++    peer = peer[-MAX_PEER_EVENTS:]
++    if not peer:
++        return "(пока тихо)"
++    return "\n".join(
++        f"- {e['agent']}: {e['payload'].get('action')}"
++        f"({str(e['payload'].get('target', ''))[:60]}) — {e['payload'].get('reason', '')[:100]}"
++        for e in peer)
++
++
++def build(plan_id: str, agent_id: str) -> str:
++    """Полная картина проекта для агента — вставляется в промпт каждого шага."""
++    return (f"{_plan_overview(plan_id)}\n\n"
++            f"ДОСКА РЕШЕНИЙ КОМАНДЫ (обязательные контракты):\n{_notes_block()}\n\n"
++            f"ФАЙЛЫ ПРОЕКТА:\n{file_tree()}\n\n"
++            f"ПОСЛЕДНИЕ ДЕЙСТВИЯ КОЛЛЕГ:\n{_peer_activity(agent_id)}")
+diff --git a/executor.py b/executor.py
+index c4f0cd7..938c2e8 100644
+--- a/executor.py
++++ b/executor.py
+@@ -89,6 +89,10 @@ class LocalExecutor:
+         path = self._resolve(self._param(p, "path", "file", "filename", "_target"))
+         return path.read_text(encoding="utf-8", errors="replace")[:MAX_READ_BYTES]
+ 
++    def _list_files(self, p: dict) -> str:
++        import context
++        return context.file_tree(str(self.root))
++
+     def _search_code(self, p: dict) -> str:
+         pattern = self._param(p, "pattern", "query", "q")
+         hits: list[str] = []
+diff --git a/ontology.yaml b/ontology.yaml
+index 0444c7d..043c2f4 100644
+--- a/ontology.yaml
++++ b/ontology.yaml
+@@ -15,6 +15,9 @@ ontology:
+     - name: PullRequest
+       key: pr_id
+       properties: [repo, branch, status]
++    - name: Blackboard
++      key: note_id
++      properties: [agent, text]
+ 
+   # ── Политика тиров: ЕДИНСТВЕННОЕ место, где решается, что требует человека ─
+   risk_tiers:
+@@ -28,6 +31,8 @@ ontology:
+   # Тир здесь — закон. Агент не может его переопределить.
+   action_types:
+     - { name: read_file,     target: Repository,  tier: AUTO }
++    - { name: list_files,    target: Repository,  tier: AUTO }
++    - { name: post_note,     target: Blackboard,  tier: LOW }
+     - { name: search_code,   target: Repository,  tier: AUTO }
+     - { name: lint,          target: Repository,  tier: AUTO }
+     - { name: run_tests,     target: Repository,  tier: LOW }
+@@ -45,18 +50,18 @@ ontology:
+   agents:
+     - name: kristina
+       role: "Lead / диспетчер"
+-      allowed_actions: [read_file, search_code]
++      allowed_actions: [read_file, search_code, list_files]
+     - name: bjorn
+       role: "Backend-разработчик"
+-      allowed_actions: [read_file, search_code, lint, run_tests, create_branch, write_file, commit, open_pr]
++      allowed_actions: [read_file, list_files, search_code, lint, run_tests, create_branch, write_file, commit, open_pr, post_note]
+     - name: elsa
+       role: "Frontend-разработчик"
+-      allowed_actions: [read_file, search_code, lint, run_tests, create_branch, write_file, commit, open_pr]
++      allowed_actions: [read_file, list_files, search_code, lint, run_tests, create_branch, write_file, commit, open_pr, post_note]
+     - name: sven
+       role: "DevOps"
+       # force_push/deploy/rotate_secret сознательно НЕ выданы: автономному офису
+       # «задача → результат» они не нужны, а это единственные необратимые действия.
+-      allowed_actions: [read_file, search_code, run_tests, create_branch, merge_pr, delete_branch]
++      allowed_actions: [read_file, list_files, search_code, run_tests, create_branch, merge_pr, delete_branch, post_note]
+     - name: ingrid
+       role: "QA"
+-      allowed_actions: [read_file, search_code, lint, run_tests]
++      allowed_actions: [read_file, list_files, search_code, lint, run_tests, post_note]
+diff --git a/planner.py b/planner.py
+index c7f01f3..bf8eaad 100644
+--- a/planner.py
++++ b/planner.py
+@@ -22,6 +22,8 @@ import uuid
+ from contextlib import closing
+ from typing import Any
+ 
++import blackboard
++import context
+ import events
+ import runner
+ from llm import LLM
+@@ -182,9 +184,12 @@ def run_project(plan_id: str, office: dict, gateway: Any) -> dict:
+     plan = get_plan(plan_id)
+     if plan["status"] not in ("planned", "running"):
+         return plan
++    if plan["status"] == "planned":
++        blackboard.clear()   # новый проект — чистая доска решений
+     _update(plan_id, status="running")
+     subtasks = plan["subtasks"]
+     total = len(subtasks)
++    ctx_provider = lambda agent_id: context.build(plan_id, agent_id)  # noqa: E731
+ 
+     for st in subtasks:
+         if st["status"] == "done":      # возобновление после рестарта
+@@ -192,11 +197,12 @@ def run_project(plan_id: str, office: dict, gateway: Any) -> dict:
+         events.publish("subtask_started", agent=st["agent"], plan_id=plan_id,
+                        n=st["n"], title=st["title"])
+         st["status"] = "in_progress"
+-        run_id = runner.create_run(_subtask_goal(plan["goal"], st, total), st["agent"])
++        run_id = runner.create_run(_subtask_goal(plan["goal"], st, total),
++                                   st["agent"], plan_id=plan_id)
+         st["run_id"] = run_id
+         _save_subtasks(plan_id, subtasks)
+ 
+-        state = runner.drive(run_id, office, gateway)
++        state = runner.drive(run_id, office, gateway, ctx_provider)
+ 
+         if state["status"] == "done":
+             st["status"] = "done"
+diff --git a/runner.py b/runner.py
+index a59e9b3..adf2803 100644
+--- a/runner.py
++++ b/runner.py
+@@ -22,7 +22,7 @@ from typing import Any
+ 
+ import events
+ 
+-MAX_STEPS = int(os.getenv("MAX_RUN_STEPS", "12"))
++MAX_STEPS = int(os.getenv("MAX_RUN_STEPS", "40"))
+ RUN_DB_PATH = os.getenv("RUN_DB_PATH", "office_runs.db")
+ 
+ 
+@@ -49,6 +49,11 @@ def init_db() -> None:
+                    created_at        REAL NOT NULL
+                )"""
+         )
++        # Миграция: привязка прогона к плану проекта (Этап 3).
++        try:
++            conn.execute("ALTER TABLE runs ADD COLUMN plan_id TEXT")
++        except sqlite3.OperationalError:
++            pass  # колонка уже есть
+         conn.commit()
+ 
+ 
+@@ -79,22 +84,27 @@ def _state(run_id: str) -> dict:
+ 
+ # ─── Жизненный цикл прогона ──────────────────────────────────────────────────
+ 
+-def create_run(goal: str, agent_id: str) -> str:
++def create_run(goal: str, agent_id: str, plan_id: str | None = None) -> str:
+     run_id = uuid.uuid4().hex[:12]
+     with closing(_db()) as conn:
+         conn.execute(
+             """INSERT INTO runs (id, goal, agent_id, status, history,
+-                                 pending_action_id, steps, summary, created_at)
+-               VALUES (:id,:goal,:agent_id,'running','[]',NULL,0,NULL,:ts)""",
+-            {"id": run_id, "goal": goal, "agent_id": agent_id, "ts": time.time()},
++                                 pending_action_id, steps, summary, created_at, plan_id)
++               VALUES (:id,:goal,:agent_id,'running','[]',NULL,0,NULL,:ts,:plan_id)""",
++            {"id": run_id, "goal": goal, "agent_id": agent_id,
++             "ts": time.time(), "plan_id": plan_id},
+         )
+         conn.commit()
+-    events.publish("run_started", agent=agent_id, run_id=run_id, goal=goal)
++    events.publish("run_started", agent=agent_id, run_id=run_id, plan_id=plan_id,
++                   goal=goal[:300])
+     return run_id
+ 
+ 
+-def drive(run_id: str, office: dict, gateway: Any) -> dict:
+-    """Крутит петлю, пока не done / пауза на одобрении / лимит шагов."""
++def drive(run_id: str, office: dict, gateway: Any,
++          context_provider: Any | None = None) -> dict:
++    """Крутит петлю, пока не done / провал / лимит шагов.
++    context_provider(agent_id) -> str — общая картина проекта (Context Broker);
++    собирается заново на каждом шаге: агент видит свежие файлы/доску/план."""
+     row = _get(run_id)
+     if row is None:
+         raise KeyError(run_id)
+@@ -109,15 +119,26 @@ def drive(run_id: str, office: dict, gateway: Any) -> dict:
+     steps: int = row["steps"]
+ 
+     while steps < MAX_STEPS:
+-        decision = agent.next_step(row["goal"], history)
++        ctx = context_provider(agent.id) if context_provider else ""
++        decision = agent.next_step(row["goal"], history, ctx)
+ 
+-        if decision.get("done") or not decision.get("action"):
++        if decision.get("done"):
+             _update(run_id, status="done", history=json.dumps(history, ensure_ascii=False),
+                     steps=steps, summary=decision.get("summary", ""))
+             events.publish("run_done", agent=agent.id, run_id=run_id,
+                            steps=steps, summary=decision.get("summary", ""))
+             return _state(run_id)
+ 
++        if not decision.get("action"):
++            # Нет действия и нет done — в автономном режиме это провал, а не
++            # успех: «молча объявить готовым» хуже честного отказа.
++            detail = decision.get("reason", "агент не вернул ни действия, ни done")
++            _update(run_id, status="failed", history=json.dumps(history, ensure_ascii=False),
++                    steps=steps, summary=detail)
++            events.publish("run_failed", agent=agent.id, run_id=run_id,
++                           steps=steps, detail=detail)
++            return _state(run_id)
++
+         gw = gateway.propose(agent.id, decision["action"],
+                              decision.get("target", ""), decision.get("params", {}),
+                              run_id=run_id, reason=decision.get("reason", ""))
+@@ -144,7 +165,8 @@ def drive(run_id: str, office: dict, gateway: Any) -> dict:
+     return _state(run_id)
+ 
+ 
+-def continue_run(run_id: str, office: dict, gateway: Any) -> dict:
++def continue_run(run_id: str, office: dict, gateway: Any,
++                 context_provider: Any | None = None) -> dict:
+     """Возобновляет приостановленную задачу после решения человека по действию."""
+     row = _get(run_id)
+     if row is None:
+@@ -161,7 +183,7 @@ def continue_run(run_id: str, office: dict, gateway: Any) -> dict:
+                     "result": rec.get("result") or rec["status"], "status": rec["status"]})
+     _update(run_id, status="running", history=json.dumps(history, ensure_ascii=False),
+             pending_action_id=None)
+-    return drive(run_id, office, gateway)
++    return drive(run_id, office, gateway, context_provider)
+ 
+ 
+ def find_run_by_pending(action_id: str) -> str | None:
+diff --git a/test_context.py b/test_context.py
+new file mode 100644
+index 0000000..d191ed7
+--- /dev/null
++++ b/test_context.py
+@@ -0,0 +1,142 @@
++"""
++Тесты Этапа 3: общая картина (Context Broker), доска решений, устойчивость петли.
++Запуск:  cd office && python -m pytest -q
++"""
++import os
++import pathlib
++import tempfile
++
++ROOT = pathlib.Path(__file__).parent
++os.environ["ONTOLOGY_PATH"] = str(ROOT / "ontology.yaml")
++for var in ("AUDIT_DB_PATH", "RUN_DB_PATH", "EVENTS_DB_PATH",
++            "OFFICE_DB_PATH", "PLANS_DB_PATH", "NOTES_DB_PATH"):
++    f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
++    f.close()
++    os.environ[var] = f.name
++
++from fastapi.testclient import TestClient  # noqa: E402
++import pytest  # noqa: E402
++import action_service  # noqa: E402
++import blackboard  # noqa: E402
++import context  # noqa: E402
++import planner  # noqa: E402
++import runner  # noqa: E402
++from agents import Gateway, build_office  # noqa: E402
++from llm import ScriptedLLM  # noqa: E402
++
++GW = Gateway(base_url="", client=TestClient(action_service.app))
++WORKERS = {"bjorn": "Backend", "elsa": "Frontend", "ingrid": "QA"}
++
++PLAN_BE_FE = ('{"subtasks":['
++              '{"agent":"bjorn","title":"API","description":"сделать API",'
++              '"acceptance":"эндпоинт описан","depends_on":[]},'
++              '{"agent":"elsa","title":"UI","description":"сделать UI под API",'
++              '"acceptance":"UI по контракту","depends_on":[1]}]}')
++
++
++@pytest.fixture(autouse=True)
++def _clean(monkeypatch):
++    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
++    blackboard.clear()
++
++
++# ─── Blackboard ──────────────────────────────────────────────────────────────
++
++def test_post_note_goes_through_gateway_with_forced_authorship():
++    # Авторство подписывает шлюз: даже если агент подсунул чужое имя.
++    out = GW.propose("bjorn", "post_note", "Blackboard",
++                     {"text": "API: POST /api/research", "author": "elsa"})
++    assert out["status"] == "executed"
++    notes = blackboard.list_notes()
++    assert notes[0]["agent"] == "bjorn"        # не elsa
++    assert "POST /api/research" in notes[0]["text"]
++
++
++def test_empty_note_fails_visibly():
++    out = GW.propose("bjorn", "post_note", "Blackboard", {"text": "  "})
++    assert out["status"] == "failed"
++
++
++# ─── Context Broker ──────────────────────────────────────────────────────────
++
++def test_context_contains_plan_notes_and_files(tmp_path, monkeypatch):
++    (tmp_path / "src").mkdir()
++    (tmp_path / "src" / "index.ts").write_text("x", encoding="utf-8")
++    (tmp_path / "node_modules").mkdir()
++    (tmp_path / "node_modules" / "junk.js").write_text("x", encoding="utf-8")
++    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
++
++    plan_id = planner.make_plan("сделай приложение",
++                                ScriptedLLM([PLAN_BE_FE]), WORKERS)
++    blackboard.add("bjorn", "стек: Next.js 15")
++
++    ctx = context.build(plan_id, "elsa")
++    assert "ЦЕЛЬ ПРОЕКТА: сделай приложение" in ctx
++    assert "[queued] bjorn: API" in ctx          # весь план со статусами
++    assert "стек: Next.js 15" in ctx             # доска решений
++    assert "index.ts" in ctx                     # файлы соседей
++    assert "junk.js" not in ctx                  # node_modules отрезан
++
++
++def test_context_tree_is_capped(tmp_path, monkeypatch):
++    for i in range(500):
++        (tmp_path / f"f{i:03}.txt").write_text("x", encoding="utf-8")
++    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
++    tree = context.file_tree()
++    assert "обрезано" in tree
++    assert len(tree.splitlines()) <= context.MAX_TREE_ENTRIES + 1
++
++
++# ─── Устойчивость петли ──────────────────────────────────────────────────────
++
++def test_next_step_retries_garbage_json_then_succeeds():
++    office = build_office(ScriptedLLM([
++        "ой, забыл про json",
++        "опять текст",
++        '{"done":true,"summary":"собрался"}',
++    ]), GW)
++    run_id = runner.create_run("цель", "bjorn")
++    st = runner.drive(run_id, office, GW)
++    assert st["status"] == "done"                # ретраи спасли шаг
++
++
++def test_persistent_garbage_fails_run_honestly():
++    # Главный фикс: мусор от LLM — это провал, а НЕ молчаливый done.
++    office = build_office(ScriptedLLM(["мусор"] * 10), GW)
++    run_id = runner.create_run("цель", "bjorn")
++    st = runner.drive(run_id, office, GW)
++    assert st["status"] == "failed"
++    assert "не удалось разобрать" in st["summary"]
++
++
++def test_agent_without_suitable_action_fails_not_done():
++    office = build_office(ScriptedLLM(
++        ['{"action":null,"reason":"нет подходящего действия"}']), GW)
++    run_id = runner.create_run("невыполнимое", "ingrid")
++    st = runner.drive(run_id, office, GW)
++    assert st["status"] == "failed"
++    assert "нет подходящего" in st["summary"]
++
++
++# ─── Единая команда: контракт передаётся от bjorn к elsa ─────────────────────
++
++def test_contract_posted_by_backend_is_visible_to_frontend():
++    # bjorn публикует контракт API → на шаге elsa Context Broker уже несёт его
++    # в промпте. Проверяем через перехват system-промпта ScriptedLLM.
++    llm = ScriptedLLM([
++        '{"action":"post_note","target":"Blackboard",'
++        '"params":{"text":"КОНТРАКТ: POST /api/research -> {findings[]}"},"reason":"контракт"}',
++        '{"done":true,"summary":"API описан"}',
++        '{"done":true,"summary":"UI сделан по контракту"}',
++    ])
++    office = build_office(llm, GW)
++    plan_id = planner.make_plan("приложение", ScriptedLLM([PLAN_BE_FE]), WORKERS)
++
++    plan = planner.run_project(plan_id, office, GW)
++
++    assert plan["status"] == "done"
++    # Контекст, который Context Broker собирал на шаге elsa, содержит
++    # контракт bjorn и статус done его подзадачи.
++    ctx = context.build(plan_id, "elsa")
++    assert "КОНТРАКТ: POST /api/research" in ctx
++    assert "[done] bjorn: API" in ctx
+diff --git a/test_planner.py b/test_planner.py
+index 617f343..246dc66 100644
+--- a/test_planner.py
++++ b/test_planner.py
+@@ -98,8 +98,8 @@ def test_project_runs_subtasks_sequentially_to_done():
+     evts = [e for e in events.list_events(after=start) if e["plan_id"] == plan_id]
+     kinds = [e["kind"] for e in evts]
+     assert kinds == ["plan_created",
+-                     "subtask_started", "subtask_done",
+-                     "subtask_started", "subtask_done",
++                     "subtask_started", "run_started", "subtask_done",
++                     "subtask_started", "run_started", "subtask_done",
+                      "project_done"]
+     # Раздача видна: кто взял подзадачу 1 и почему проект завершён.
+     assert evts[1]["agent"] == "bjorn"

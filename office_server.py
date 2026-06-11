@@ -22,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from agents import Gateway, build_office, load_roster
+import blackboard
 from dispatcher import Dispatcher
 import events
 from llm import OpenAICompatibleLLM
@@ -136,6 +137,12 @@ def office_events(after: int = 0, limit: int = 200) -> dict:
     """Лента событий офиса («стекло»). Центр поллит с курсором after=<id>."""
     evts = events.list_events(after=after, limit=limit)
     return {"events": evts, "last_id": evts[-1]["id"] if evts else after}
+
+
+@app.get("/office/notes")
+def office_notes() -> dict:
+    """Доска решений команды — для вкладки Blackboard в «стекле»."""
+    return {"notes": blackboard.list_notes()}
 
 
 @app.get("/office/agents")
