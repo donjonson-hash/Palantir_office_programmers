@@ -14,6 +14,9 @@ os.environ["ONTOLOGY_PATH"] = str(ROOT / "ontology.yaml")
 _audit = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _audit.close()
 os.environ["AUDIT_DB_PATH"] = _audit.name
+_events = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+_events.close()
+os.environ["EVENTS_DB_PATH"] = _events.name
 
 from executor import LocalExecutor, StubExecutor, get_executor  # noqa: E402
 
@@ -72,7 +75,8 @@ def test_factory_defaults_to_stub_without_workspace(monkeypatch):
 
 
 def test_gateway_executes_through_local_executor(repo, monkeypatch):
-    # write_file теперь HIGH: предложение → pending → одобрение человека → запись.
+    # Автономная политика: write_file (HIGH) проходит шлюз и пишется сразу,
+    # след остаётся в провенансе и ленте событий.
     monkeypatch.setenv("WORKSPACE_ROOT", str(repo))
     from fastapi.testclient import TestClient
     import action_service
@@ -81,10 +85,7 @@ def test_gateway_executes_through_local_executor(repo, monkeypatch):
         "agent_id": "bjorn", "action": "write_file", "target": repo.name,
         "params": {"path": "from_gateway.txt", "content": "через шлюз"}})
     body = r.json()
-    assert body["status"] == "pending"                       # не записалось само
-    assert not (repo / "from_gateway.txt").exists()
-    a = client.post(f"/actions/{body['id']}/approve", params={"approver": "don"})
-    assert a.json()["status"] == "executed"                  # записалось после человека
+    assert body["status"] == "executed"
     assert (repo / "from_gateway.txt").read_text(encoding="utf-8") == "через шлюз"
 
 

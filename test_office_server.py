@@ -8,7 +8,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).parent
 os.environ["ONTOLOGY_PATH"] = str(ROOT / "ontology.yaml")
-for var in ("AUDIT_DB_PATH", "OFFICE_DB_PATH"):
+for var in ("AUDIT_DB_PATH", "OFFICE_DB_PATH", "EVENTS_DB_PATH"):
     f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     f.close()
     os.environ[var] = f.name
@@ -44,20 +44,22 @@ def test_submit_task_routes_and_proposes():
 
 
 def test_task_is_logged_and_listable():
+    # Автономный офис: deploy выведен из полномочий sven — агент-side
+    # предохранитель отказывает ещё до шлюза, и это видно в журнале.
     _inject('{"action":"deploy","target":"syndi-vercel","params":{},"reason":"релиз"}',
             '{"agent":"sven","reason":"деплой"}')
     out = office.post("/office/task", json={"task": "выкати на прод"}).json()
     tasks = office.get("/office/tasks").json()["tasks"]
     rec = next(t for t in tasks if t["id"] == out["task_id"])
     assert rec["routed_to"] == "sven"
-    assert rec["action"] == "deploy"
-    assert rec["status"] == "pending"   # CRITICAL → ждёт одобрения
+    assert rec["status"] == "forbidden"   # необратимое действие никому не выдано
 
 
 def test_ontology_mirror_exposes_policy():
     o = office.get("/office/ontology").json()
     # тиры, каталог действий и штат видны центру
-    assert "HIGH" in o["risk_tiers"] and o["risk_tiers"]["HIGH"]["requires_approval"] is True
+    assert "HIGH" in o["risk_tiers"] and o["risk_tiers"]["HIGH"]["requires_approval"] is False
+    assert o["risk_tiers"]["CRITICAL"]["requires_approval"] is True
     names = {a["name"] for a in o["action_types"]}
     assert {"write_file", "deploy", "read_file"} <= names
     wf = next(a for a in o["action_types"] if a["name"] == "write_file")

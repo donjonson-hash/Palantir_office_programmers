@@ -21,8 +21,8 @@ ontology:
     AUTO:     { requires_approval: false, description: "Чтение/поиск — не меняет состояние" }
     LOW:      { requires_approval: false, description: "Обратимо и дёшево" }
     MEDIUM:   { requires_approval: false, description: "Изменения в рабочей ветке, обратимо через git" }
-    HIGH:     { requires_approval: true,  description: "Влияет на общую ветку или историю" }
-    CRITICAL: { requires_approval: true,  description: "Необратимо либо затрагивает прод/секреты" }
+    HIGH:     { requires_approval: false, description: "Влияет на общую ветку; авто в режиме автономии, обратимо через git" }
+    CRITICAL: { requires_approval: true,  description: "Необратимо либо затрагивает прод/секреты; в автономном офисе никому не разрешено" }
 
   # ── Каталог Действий: ЕДИНСТВЕННЫЙ список того, что агент может предложить ──
   # Тир здесь — закон. Агент не может его переопределить.
@@ -54,7 +54,9 @@ ontology:
       allowed_actions: [read_file, search_code, lint, run_tests, create_branch, write_file, commit, open_pr]
     - name: sven
       role: "DevOps"
-      allowed_actions: [read_file, search_code, run_tests, create_branch, merge_pr, delete_branch, force_push, deploy, rotate_secret]
+      # force_push/deploy/rotate_secret сознательно НЕ выданы: автономному офису
+      # «задача → результат» они не нужны, а это единственные необратимые действия.
+      allowed_actions: [read_file, search_code, run_tests, create_branch, merge_pr, delete_branch]
     - name: ingrid
       role: "QA"
       allowed_actions: [read_file, search_code, lint, run_tests]

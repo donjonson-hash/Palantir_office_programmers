@@ -8,7 +8,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).parent
 os.environ["ONTOLOGY_PATH"] = str(ROOT / "ontology.yaml")
-for var in ("AUDIT_DB_PATH", "RUN_DB_PATH"):
+for var in ("AUDIT_DB_PATH", "RUN_DB_PATH", "EVENTS_DB_PATH"):
     f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     f.close()
     os.environ[var] = f.name
@@ -32,7 +32,23 @@ def office_running(script):
     return build_office(ScriptedLLM(script), GW)
 
 
-def test_loop_pauses_on_high_then_resumes_to_done():
+def test_loop_runs_high_autonomously():
+    # Автономная политика: write_file (HIGH) исполняется без паузы, петля идёт до done.
+    office = office_running([
+        '{"action":"write_file","target":"repo","params":{"path":"b","content":"c"},"reason":"правка"}',
+        '{"done":true,"summary":"готово"}',
+    ])
+    run_id = runner.create_run("автономная правка", "bjorn")
+    st = runner.drive(run_id, office, GW)
+    assert st["status"] == "done"
+    assert st["history"][0]["action"] == "write_file"
+    assert st["history"][0]["status"] == "executed"
+
+
+def test_loop_pauses_on_gated_tier_then_resumes_to_done(monkeypatch):
+    # Механизм паузы сохранён как страховка: если тиру вернуть requires_approval,
+    # петля встанет и возобновится после решения человека.
+    monkeypatch.setitem(action_service.TIER_POLICY, "HIGH", True)
     # read_file (AUTO, авто) → write_file (HIGH, пауза) → [человек одобрил] → done
     office = office_running([
         '{"action":"read_file","target":"repo","params":{"path":"a"},"reason":"посмотреть"}',
@@ -55,8 +71,9 @@ def test_loop_pauses_on_high_then_resumes_to_done():
     assert actions == ["read_file", "write_file"]
 
 
-def test_reject_lets_agent_finish():
-    # write_file (HIGH) → [человек отклонил] → агент видит отказ и завершает
+def test_reject_lets_agent_finish(monkeypatch):
+    # write_file (HIGH, гейт включён страховкой) → [отклонил] → агент завершает
+    monkeypatch.setitem(action_service.TIER_POLICY, "HIGH", True)
     office = office_running([
         '{"action":"write_file","target":"repo","params":{"path":"b","content":"c"},"reason":"правка"}',
         '{"done":true,"summary":"остановлено по отказу"}',

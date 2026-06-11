@@ -11,6 +11,9 @@ os.environ["ONTOLOGY_PATH"] = str(ROOT / "ontology.yaml")
 _tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _tmp.close()
 os.environ["AUDIT_DB_PATH"] = _tmp.name
+_tmp2 = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+_tmp2.close()
+os.environ["EVENTS_DB_PATH"] = _tmp2.name
 
 from fastapi.testclient import TestClient  # noqa: E402
 import action_service  # noqa: E402
@@ -35,7 +38,19 @@ def test_auto_action_executes_immediately():
     assert r.json()["status"] == "executed"
 
 
-def test_critical_action_requires_human_approval():
+def test_critical_actions_removed_from_staff():
+    # Автономный офис: необратимые действия (deploy/force_push/rotate_secret)
+    # никому не выданы — шлюз отказывает даже DevOps.
+    r = client.post("/actions/propose", json={
+        "agent_id": "sven", "action": "deploy", "target": "syndi-vercel"})
+    assert r.status_code == 403
+
+
+def test_approval_mechanism_preserved_as_safety_net(monkeypatch):
+    # Механизм очереди одобрений остаётся в коде как страховка: если CRITICAL
+    # действие когда-нибудь выдадут роли — оно встанет в pending, а не исполнится.
+    monkeypatch.setitem(action_service.AGENT_PERMISSIONS, "sven",
+                        action_service.AGENT_PERMISSIONS["sven"] | {"deploy"})
     r = client.post("/actions/propose", json={
         "agent_id": "sven", "action": "deploy", "target": "syndi-vercel"})
     body = r.json()
@@ -53,13 +68,13 @@ def test_unknown_action_is_rejected():
 
 def test_agent_cannot_set_its_own_tier():
     # Агент подсовывает requires_approval=false в params — поле игнорируется.
-    # merge_pr — тир HIGH в онтологии → всё равно очередь на одобрение.
-    # (sven вправе делать merge_pr; полномочия проверяются отдельно.)
+    # Тир берётся ИЗ онтологии (merge_pr → HIGH), а не из предложения агента.
+    # В автономной политике HIGH исполняется сразу, но тир в провенансе честный.
     r = client.post("/actions/propose", json={
         "agent_id": "sven", "action": "merge_pr", "target": "PR-42",
         "params": {"requires_approval": False}})
     assert r.json()["tier"] == "HIGH"
-    assert r.json()["status"] == "pending"
+    assert r.json()["status"] == "executed"
 
 
 def test_gateway_enforces_permissions_even_if_agent_bypasses_guard():
@@ -79,10 +94,11 @@ def test_unknown_agent_is_denied():
     assert r.status_code == 403
 
 
-def test_write_file_requires_approval():
-    # Замок: запись файлов — тир HIGH, исполняется только после человека.
+def test_write_file_executes_autonomously():
+    # Автономный офис: запись файлов (HIGH) исполняется без человека,
+    # но тир и след остаются в провенансе.
     r = client.post("/actions/propose", json={
         "agent_id": "bjorn", "action": "write_file", "target": "syndi-vercel",
         "params": {"path": "x.txt", "content": "y"}})
     assert r.json()["tier"] == "HIGH"
-    assert r.json()["status"] == "pending"
+    assert r.json()["status"] == "executed"

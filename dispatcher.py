@@ -12,6 +12,7 @@ import json
 from typing import Any
 
 from agents import Agent
+import events
 from llm import LLM
 
 ROUTER_SYSTEM = """Ты — Kristina, лид команды разработки. Распредели задачу ОДНОМУ исполнителю.
@@ -46,8 +47,13 @@ class Dispatcher:
         choice = _parse_json(self.llm.complete(ROUTER_SYSTEM.format(roster=roster), task))
         agent = choice.get("agent")
         if agent in self.workers:
+            events.publish("task_routed", agent="kristina", task=task[:300],
+                           routed_to=agent, reason=choice.get("reason", ""))
             return agent, choice.get("reason", "")
-        return self._fallback(task), "fallback по ключевым словам"
+        fallback = self._fallback(task)
+        events.publish("task_routed", agent="kristina", task=task[:300],
+                       routed_to=fallback, reason="fallback по ключевым словам")
+        return fallback, "fallback по ключевым словам"
 
     def _fallback(self, task: str) -> str:
         low = task.lower()

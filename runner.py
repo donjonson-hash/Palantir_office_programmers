@@ -20,6 +20,8 @@ import uuid
 from contextlib import closing
 from typing import Any
 
+import events
+
 MAX_STEPS = int(os.getenv("MAX_RUN_STEPS", "12"))
 RUN_DB_PATH = os.getenv("RUN_DB_PATH", "office_runs.db")
 
@@ -87,6 +89,7 @@ def create_run(goal: str, agent_id: str) -> str:
             {"id": run_id, "goal": goal, "agent_id": agent_id, "ts": time.time()},
         )
         conn.commit()
+    events.publish("run_started", agent=agent_id, run_id=run_id, goal=goal)
     return run_id
 
 
@@ -98,6 +101,8 @@ def drive(run_id: str, office: dict, gateway: Any) -> dict:
     agent = office.get(row["agent_id"])
     if agent is None:
         _update(run_id, status="failed", summary=f"нет агента {row['agent_id']}")
+        events.publish("run_failed", agent=row["agent_id"], run_id=run_id,
+                       detail=f"нет агента {row['agent_id']}")
         return _state(run_id)
 
     history: list[dict] = json.loads(row["history"])
@@ -109,10 +114,13 @@ def drive(run_id: str, office: dict, gateway: Any) -> dict:
         if decision.get("done") or not decision.get("action"):
             _update(run_id, status="done", history=json.dumps(history, ensure_ascii=False),
                     steps=steps, summary=decision.get("summary", ""))
+            events.publish("run_done", agent=agent.id, run_id=run_id,
+                           steps=steps, summary=decision.get("summary", ""))
             return _state(run_id)
 
         gw = gateway.propose(agent.id, decision["action"],
-                             decision.get("target", ""), decision.get("params", {}))
+                             decision.get("target", ""), decision.get("params", {}),
+                             run_id=run_id, reason=decision.get("reason", ""))
         steps += 1
         status = gw.get("status")
 
@@ -131,6 +139,8 @@ def drive(run_id: str, office: dict, gateway: Any) -> dict:
 
     _update(run_id, status="stopped", history=json.dumps(history, ensure_ascii=False),
             steps=steps, summary=f"достигнут лимит шагов ({MAX_STEPS})")
+    events.publish("run_stopped", agent=agent.id, run_id=run_id,
+                   steps=steps, detail=f"достигнут лимит шагов ({MAX_STEPS})")
     return _state(run_id)
 
 

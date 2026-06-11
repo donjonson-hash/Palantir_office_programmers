@@ -28,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from executor import get_executor
+import events
 
 ONTOLOGY_PATH = os.getenv("ONTOLOGY_PATH", "ontology.yaml")
 AUDIT_DB_PATH = os.getenv("AUDIT_DB_PATH", "office_audit.db")
@@ -138,6 +139,9 @@ class ProposeRequest(BaseModel):
     action: str
     target: str
     params: dict[str, Any] = {}
+    # Наблюдательные поля для «стекла»: не влияют на политику и исполнение.
+    run_id: str | None = None
+    reason: str = ""
 
 
 class ActionView(BaseModel):
@@ -171,6 +175,9 @@ def propose(req: ProposeRequest) -> ActionView:
                  "target": req.target, "params": params_json, "tier": "UNKNOWN",
                  "status": "rejected_unknown", "result": None, "provenance_hash": full,
                  "created_at": ts, "decided_at": ts, "decided_by": "ontology"})
+        events.publish("action_rejected", agent=req.agent_id, run_id=req.run_id,
+                       action=req.action, target=req.target,
+                       detail="действие отсутствует в онтологии")
         raise HTTPException(422, f"Действие '{req.action}' отсутствует в онтологии")
 
     # Полномочия: неподкупная проверка на шлюзе — агент не может её обойти.
@@ -181,6 +188,9 @@ def propose(req: ProposeRequest) -> ActionView:
                  "target": req.target, "params": params_json, "tier": spec["tier"],
                  "status": "rejected_forbidden", "result": None, "provenance_hash": full,
                  "created_at": ts, "decided_at": ts, "decided_by": "ontology"})
+        events.publish("action_rejected", agent=req.agent_id, run_id=req.run_id,
+                       action=req.action, target=req.target,
+                       detail="нет полномочий на действие")
         raise HTTPException(403, f"Агент '{req.agent_id}' не имеет полномочий на '{req.action}'")
 
     tier = spec["tier"]
@@ -192,6 +202,9 @@ def propose(req: ProposeRequest) -> ActionView:
 
     if requires_approval:
         _record({**base, "status": "pending"})
+        events.publish("action_pending", agent=req.agent_id, run_id=req.run_id,
+                       action=req.action, target=req.target, tier=tier,
+                       reason=req.reason)
         return ActionView(id=action_id, agent_id=req.agent_id, action=req.action,
                           target=req.target, tier=tier, status="pending")
 
@@ -200,10 +213,16 @@ def propose(req: ProposeRequest) -> ActionView:
     except Exception as e:  # сбой реального исполнителя → failed в провенанс, не 500
         _record({**base, "status": "failed", "result": str(e),
                  "decided_at": ts, "decided_by": "auto"})
+        events.publish("action_failed", agent=req.agent_id, run_id=req.run_id,
+                       action=req.action, target=req.target, tier=tier,
+                       reason=req.reason, error=str(e)[:500])
         return ActionView(id=action_id, agent_id=req.agent_id, action=req.action,
                           target=req.target, tier=tier, status="failed", result=str(e))
     _record({**base, "status": "executed", "result": result,
              "decided_at": ts, "decided_by": "auto"})
+    events.publish("action_executed", agent=req.agent_id, run_id=req.run_id,
+                   action=req.action, target=req.target, tier=tier,
+                   reason=req.reason, result=str(result)[:500])
     return ActionView(id=action_id, agent_id=req.agent_id, action=req.action,
                       target=req.target, tier=tier, status="executed", result=result)
 

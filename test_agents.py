@@ -11,6 +11,9 @@ os.environ["ONTOLOGY_PATH"] = str(ROOT / "ontology.yaml")
 _tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _tmp.close()
 os.environ["AUDIT_DB_PATH"] = _tmp.name
+_tmp2 = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+_tmp2.close()
+os.environ["EVENTS_DB_PATH"] = _tmp2.name
 
 from fastapi.testclient import TestClient  # noqa: E402
 import action_service  # noqa: E402
@@ -41,12 +44,13 @@ def test_agent_proposes_auto_action_through_gateway():
     assert out["gateway"]["status"] == "executed"
 
 
-def test_risky_action_goes_to_approval_queue():
+def test_irreversible_action_blocked_by_role_guard():
+    # Автономный офис: deploy выведен из полномочий sven — предохранитель
+    # роли останавливает действие ещё до шлюза.
     office = office_with(
         '{"action":"deploy","target":"syndi-vercel","params":{},"reason":"релиз"}')
     out = office["sven"].act("выкати на прод")
-    assert out["gateway"]["tier"] == "CRITICAL"
-    assert out["gateway"]["status"] == "pending"   # человек одобрит из центра
+    assert out["status"] == "forbidden"
 
 
 def test_agent_cannot_propose_outside_its_role():

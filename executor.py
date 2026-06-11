@@ -159,6 +159,18 @@ class LocalExecutor:
             raise RuntimeError(f"gh pr create не удался: {(pr.stderr or pr.stdout).strip()[:400]}")
         return f"PR открыт: {pr.stdout.strip()}"
 
+    # — Merge PR через gh CLI (HIGH) —
+    def _merge_pr(self, p: dict) -> str:
+        pr = self._param(p, "pr", "number", "branch", "head", "_target")
+        flag = {"merge":"--merge","squash":"--squash","rebase":"--rebase"}.get(p.get("method","merge"), "--merge")
+        if shutil.which("gh") is None:
+            raise RuntimeError("gh CLI не установлен")
+        r = subprocess.run(["gh","pr","merge",pr,flag,"--delete-branch"],
+                           cwd=self.root, capture_output=True, text=True, timeout=CMD_TIMEOUT)
+        if r.returncode != 0:
+            raise RuntimeError(f"gh pr merge не удался: {(r.stderr or r.stdout).strip()[:400]}")
+        return f"PR смёржен: {r.stdout.strip()}"
+
     def _argv(self, *args: str) -> str:
         r = subprocess.run(list(args), cwd=self.root, capture_output=True,
                            text=True, timeout=CMD_TIMEOUT)

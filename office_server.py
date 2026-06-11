@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from agents import Gateway, build_office, load_roster
 from dispatcher import Dispatcher
+import events
 from llm import OpenAICompatibleLLM
 import runner
 
@@ -127,6 +128,13 @@ def list_tasks(limit: int = 50) -> dict:
             "SELECT * FROM tasks ORDER BY created_at DESC LIMIT :n", {"n": limit}
         ).fetchall()
     return {"tasks": [dict(r) for r in rows]}
+
+
+@app.get("/office/events")
+def office_events(after: int = 0, limit: int = 200) -> dict:
+    """Лента событий офиса («стекло»). Центр поллит с курсором after=<id>."""
+    evts = events.list_events(after=after, limit=limit)
+    return {"events": evts, "last_id": evts[-1]["id"] if evts else after}
 
 
 @app.get("/office/agents")

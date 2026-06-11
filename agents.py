@@ -32,10 +32,12 @@ class Gateway:
         self._client = client
 
     def propose(self, agent_id: str, action: str, target: str,
-                params: dict[str, Any]) -> dict:
+                params: dict[str, Any], *, run_id: str | None = None,
+                reason: str = "") -> dict:
         url = f"{self.base_url}/actions/propose"
         payload = {"agent_id": agent_id, "action": action,
-                   "target": target, "params": params}
+                   "target": target, "params": params,
+                   "run_id": run_id, "reason": reason}
         r = (self._client.post(url, json=payload) if self._client
              else httpx.post(url, json=payload, timeout=30))
         if r.status_code == 422:
@@ -94,7 +96,8 @@ class Agent:
                     "reason": f"'{action}' вне полномочий роли «{self.role}»"}
 
         result = self.gateway.propose(self.id, action,
-                                      choice.get("target", ""), choice.get("params", {}))
+                                      choice.get("target", ""), choice.get("params", {}),
+                                      reason=choice.get("reason", ""))
         return {"agent": self.id, "action": action,
                 "reason": choice.get("reason", ""), "gateway": result}
 

@@ -53,39 +53,10 @@ def log_action(action_req: ActionRequest, status: str, result: str = ""):
     return entry["action_id"]
 
 async def execute_with_openclaw(action: str, target: str, params: dict) -> str:
-    """Выполняет действие через HTTP API OpenClaw"""
-    
-    async with httpx.AsyncClient() as client:
-        try:
-            # Пробуем разные эндпоинты
-            endpoints = [
-                ("POST", "/api/execute", {"action": action, "target": target, **params}),
-                ("POST", "/command", {"cmd": action, "args": params}),
-                ("GET", f"/api/action/{action}", {"target": target}),
-            ]
-            
-            for method, endpoint, data in endpoints:
-                url = f"http://localhost:18789{endpoint}"
-                if method == "POST":
-                    resp = await client.post(url, json=data, timeout=5)
-                else:
-                    resp = await client.get(url, params=data, timeout=5)
-                
-                if resp.status_code == 200:
-                    return f"✅ OpenClaw HTTP: {resp.json()}"
-            
-            return "⚠️ No working HTTP endpoint found"
-            
-        except Exception as e:
-            return f"⚠️ OpenClaw HTTP error: {str(e)}"
-
-async def execute_with_openclaw(action: str, target: str, params: dict) -> str:
     try:
         async with websockets.connect(OPENCLAW_URL) as ws:
-            # Получаем challenge
             challenge_msg = await asyncio.wait_for(ws.recv(), timeout=10)
             challenge = json.loads(challenge_msg)
-            
             if challenge.get("type") == "event" and challenge.get("event") == "connect.challenge":
                 nonce = challenge["payload"]["nonce"]
                 auth_response = json.dumps({
@@ -93,14 +64,12 @@ async def execute_with_openclaw(action: str, target: str, params: dict) -> str:
                     "payload": {"api_key": OPENCLAW_API_KEY, "nonce": nonce}
                 })
                 await ws.send(auth_response)
-            
-            # Отправляем команду
             cmd = json.dumps({"url": params.get("url", "https://google.com")})
             await ws.send(cmd)
             response = await asyncio.wait_for(ws.recv(), timeout=30)
-            return f"✅ OpenClaw executed: {response}"
+            return f"OpenClaw executed: {response}"
     except Exception as e:
-        return f"⚠️ OpenClaw error: {str(e)}"
+        return f"OpenClaw error: {str(e)}"
 
 async def execute_action(action: str, target: str, params: dict) -> str:
     await asyncio.sleep(0.2)
@@ -108,12 +77,10 @@ async def execute_action(action: str, target: str, params: dict) -> str:
 
 @app.post("/api/actions/execute", response_model=ActionResponse)
 async def execute(request: ActionRequest):
-    print(f"[REQUEST] {request.agent_id} → {request.action} on {request.target}")
-    
+    print(f"[REQUEST] {request.agent_id} -> {request.action} on {request.target}")
     if request.requires_approval:
         action_id = log_action(request, "pending_approval")
         return ActionResponse(status="pending_approval", action_id=action_id, message="Awaiting approval")
-    
     try:
         result = await execute_action(request.action, request.target, request.params)
         action_id = log_action(request, "executed", result)
