@@ -22,3 +22,5 @@ dist/
 .idea/
 .vscode/
 *.log
+*.patch
+package-lock.json

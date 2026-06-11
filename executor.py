@@ -116,6 +116,11 @@ class LocalExecutor:
     def _run_tests(self, p: dict) -> str:
         return self._sh(self.test_cmd)
 
+    def _install_deps(self, p: dict) -> str:
+        # Фиксированная команда (не произвольный shell): ставит зависимости
+        # проекта. INSTALL_CMD позволяет заменить на pip/pnpm при нужде.
+        return self._sh(os.getenv("INSTALL_CMD", "npm install"))
+
     # — Запись/git (MEDIUM) —
     def _write_file(self, p: dict) -> str:
         rel = self._param(p, "path", "file", "filename", "_target")

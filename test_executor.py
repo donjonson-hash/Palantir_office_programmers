@@ -147,3 +147,11 @@ def test_write_file_falls_back_to_target_as_path(repo):
     ex = LocalExecutor(repo)
     ex.run("write_file", "NOTES.md", {"content": "привет"})   # path только в target
     assert (repo / "NOTES.md").read_text(encoding="utf-8") == "привет"
+
+
+def test_install_deps_runs_fixed_command(repo, monkeypatch):
+    monkeypatch.setenv("WORKSPACE_ROOT", str(repo))
+    monkeypatch.setenv("INSTALL_CMD", "echo deps-installed")
+    from executor import get_executor
+    out = get_executor().run("install_deps", repo.name, {})
+    assert "exit=0" in out and "deps-installed" in out
