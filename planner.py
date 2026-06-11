@@ -244,7 +244,19 @@ def _verification_phase(plan_id: str, goal: str, subtasks: list[dict],
 
 def run_project(plan_id: str, office: dict, gateway: Any) -> dict:
     """Ведёт подзадачи плана последовательно до конца / первого провала.
-    Синхронная функция: на сервере запускается в фоне (BackgroundTasks)."""
+    Синхронная функция: на сервере запускается в фоне (BackgroundTasks).
+    Любое неожиданное исключение -> project_failed с диагнозом, не молчание."""
+    try:
+        return _run_project(plan_id, office, gateway)
+    except Exception as e:
+        detail = f"внутренняя ошибка оркестратора: {type(e).__name__}: {e}"
+        _update(plan_id, status="failed", summary=detail)
+        events.publish("project_failed", agent="kristina", plan_id=plan_id,
+                       detail=detail[:500])
+        return get_plan(plan_id)
+
+
+def _run_project(plan_id: str, office: dict, gateway: Any) -> dict:
     plan = get_plan(plan_id)
     if plan["status"] not in ("planned", "running"):
         return plan

@@ -140,3 +140,27 @@ def test_contract_posted_by_backend_is_visible_to_frontend():
     ctx = context.build(plan_id, "elsa")
     assert "КОНТРАКТ: POST /api/research" in ctx
     assert "[done] bjorn: API" in ctx
+
+
+def test_gateway_transport_failure_fails_run_not_hangs():
+    # Транспорт до шлюза умер (таймаут) → run_failed с диагнозом, не зависание.
+    class DeadGateway:
+        def propose(self, *a, **k):
+            raise TimeoutError("httpx.ReadTimeout: 30s")
+    office = build_office(ScriptedLLM([
+        '{"action":"install_deps","target":"repo","params":{},"reason":"ставлю"}',
+    ]), GW)
+    run_id = runner.create_run("установи зависимости", "bjorn")
+    st = runner.drive(run_id, office, DeadGateway())
+    assert st["status"] == "failed"
+    assert "шлюз недоступен" in st["summary"]
+
+
+def test_orchestrator_crash_marks_project_failed(monkeypatch):
+    # Любое неожиданное исключение внутри оркестрации → project_failed, не молчание.
+    plan_id = planner.make_plan("цель", ScriptedLLM([PLAN_BE_FE]), WORKERS)
+    monkeypatch.setattr(planner.runner, "create_run",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("диск умер")))
+    plan = planner.run_project(plan_id, {}, GW)
+    assert plan["status"] == "failed"
+    assert "диск умер" in plan["summary"]

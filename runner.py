@@ -139,9 +139,20 @@ def drive(run_id: str, office: dict, gateway: Any,
                            steps=steps, detail=detail)
             return _state(run_id)
 
-        gw = gateway.propose(agent.id, decision["action"],
-                             decision.get("target", ""), decision.get("params", {}),
-                             run_id=run_id, reason=decision.get("reason", ""))
+        try:
+            gw = gateway.propose(agent.id, decision["action"],
+                                 decision.get("target", ""), decision.get("params", {}),
+                                 run_id=run_id, reason=decision.get("reason", ""))
+        except Exception as e:
+            # Транспорт до шлюза умер (таймаут/сеть). Прогон не «зависает»,
+            # а честно падает с диагнозом в ленте.
+            detail = f"шлюз недоступен на действии {decision['action']}: {e}"
+            _update(run_id, status="failed",
+                    history=json.dumps(history, ensure_ascii=False),
+                    steps=steps, summary=detail)
+            events.publish("run_failed", agent=agent.id, run_id=run_id,
+                           steps=steps, detail=detail[:500])
+            return _state(run_id)
         steps += 1
         status = gw.get("status")
 

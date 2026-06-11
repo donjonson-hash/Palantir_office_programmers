@@ -19,6 +19,9 @@ from llm import LLM
 
 ONTOLOGY_PATH = os.getenv("ONTOLOGY_PATH", "ontology.yaml")
 GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:8000")
+# Действия бывают долгими (npm install, сборка): клиент шлюза обязан ждать
+# дольше, чем CMD_TIMEOUT исполнителя, иначе петля умрёт раньше действия.
+GATEWAY_HTTP_TIMEOUT = float(os.getenv("GATEWAY_HTTP_TIMEOUT", "900"))
 
 
 # ─── Шлюз: единственный канал воздействия на мир ─────────────────────────────
@@ -39,7 +42,7 @@ class Gateway:
                    "target": target, "params": params,
                    "run_id": run_id, "reason": reason}
         r = (self._client.post(url, json=payload) if self._client
-             else httpx.post(url, json=payload, timeout=30))
+             else httpx.post(url, json=payload, timeout=GATEWAY_HTTP_TIMEOUT))
         if r.status_code == 422:
             return {"status": "rejected_unknown", "detail": r.json().get("detail")}
         if r.status_code == 403:
@@ -49,7 +52,7 @@ class Gateway:
 
     def get_action(self, action_id: str) -> dict:
         url = f"{self.base_url}/actions/{action_id}"
-        r = (self._client.get(url) if self._client else httpx.get(url, timeout=30))
+        r = (self._client.get(url) if self._client else httpx.get(url, timeout=GATEWAY_HTTP_TIMEOUT))
         r.raise_for_status()
         return r.json()
 
