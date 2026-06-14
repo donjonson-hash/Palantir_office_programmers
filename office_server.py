@@ -46,11 +46,15 @@ _dispatcher: Optional[Dispatcher] = None  # можно подменить в т�
 def get_dispatcher() -> Dispatcher:
     global _dispatcher
     if _dispatcher is None:
+        from llm import get_provider
         try:
-            llm = OpenAICompatibleLLM()  # ключи из env
+            # Kristina (планировщик) — на провайдере KRISTINA или дефолтном;
+            # агенты собираются каждый на своём провайдере (build_office(None,...)).
+            kristina_llm = get_provider(os.getenv("KRISTINA_PROVIDER"))
         except RuntimeError as e:
             raise HTTPException(503, str(e))
-        _dispatcher = Dispatcher(build_office(llm, Gateway(GATEWAY_URL)), llm)
+        _dispatcher = Dispatcher(
+            build_office(None, Gateway(GATEWAY_URL)), kristina_llm)
     return _dispatcher
 
 

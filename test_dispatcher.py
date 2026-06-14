@@ -23,6 +23,17 @@ from llm import FakeLLM  # noqa: E402
 
 GW = Gateway(base_url="", client=TestClient(action_service.app))
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _stub_execute(monkeypatch):
+    # Диспетчер-тесты не должны запускать реальные npm/git: подменяем исполнитель
+    # детерминированной заглушкой, иначе run_tests висит до CMD_TIMEOUT.
+    monkeypatch.setattr(action_service, "execute",
+                        lambda action, target, params: f"[stub] {action}")
+
+
 
 def make(action_json: str, routing_json: str, default: str = "bjorn") -> Dispatcher:
     # Раздельные «мозги»: агенты выбирают действие, Kristina — исполнителя.

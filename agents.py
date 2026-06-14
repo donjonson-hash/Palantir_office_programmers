@@ -79,6 +79,7 @@ class Agent:
         self.id: str = spec["name"]
         self.role: str = spec.get("role", "")
         self.allowed: list[str] = spec.get("allowed_actions", [])
+        self.provider: str | None = spec.get("provider")  # имя провайдера из онтологии
         self.llm = llm
         self.gateway = gateway
 
@@ -143,6 +144,10 @@ LOOP_PROMPT = """Ты — {name}, {role} в команде разработки.
 - Соблюдай контракты с ДОСКИ РЕШЕНИЙ. Принял решение, важное для коллег
   (формат API, стек, структура папок), — опубликуй его: post_note, params {{"text":"..."}}.
 - Не пересоздавай то, что уже есть в ФАЙЛАХ ПРОЕКТА, — встраивайся.
+- ПЕРЕД изменением существующего файла ОБЯЗАТЕЛЬНО сначала прочитай его (read_file)
+  и сохрани ВСЁ, что в нём уже есть: другие функции, экспорты, обработчики,
+  импорты. Добавляя новое — не удаляй и не затирай существующее. Перезапись файла
+  без чтения, теряющая прежний код, — грубая ошибка.
 - write_file: params {{"path":"<относительный путь>","content":"<полное содержимое файла>"}}.
 
 {budget}
@@ -164,7 +169,15 @@ def _parse_json(text: str) -> dict:
             "reason": "не удалось разобрать ответ LLM"}
 
 
-def build_office(llm: LLM, gateway: Gateway,
+def build_office(llm: LLM | None = None, gateway: Gateway | None = None,
                  roster_path: str = ONTOLOGY_PATH) -> dict[str, Agent]:
-    return {name: Agent(spec, llm, gateway)
-            for name, spec in load_roster(roster_path).items()}
+    """Собирает штат. Если llm передан (тесты) — он общий для всех агентов.
+    Если llm=None (прод) — каждый агент получает LLM своего провайдера из
+    онтологии (поле provider), что и позволяет bjorn работать на MiMo,
+    а reviewer/kristina — на Claude."""
+    from llm import get_provider
+    office: dict[str, Agent] = {}
+    for name, spec in load_roster(roster_path).items():
+        agent_llm = llm if llm is not None else get_provider(spec.get("provider"))
+        office[name] = Agent(spec, agent_llm, gateway)
+    return office

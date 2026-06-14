@@ -25,12 +25,14 @@ from typing import Any
 import blackboard
 import context
 import events
+import review
 import runner
 from llm import LLM
 
 PLANS_DB_PATH = os.getenv("PLANS_DB_PATH", "office_plans.db")
 PLAN_RETRIES = int(os.getenv("PLAN_RETRIES", "3"))
 MAX_FIX_ITERATIONS = int(os.getenv("MAX_FIX_ITERATIONS", "3"))
+MAX_REVIEW_FIXES = int(os.getenv("MAX_REVIEW_FIXES", "2"))
 VERIFY_CHECKS = ("run_tests", "lint")
 
 
@@ -253,6 +255,40 @@ def _verification_phase(plan_id: str, goal: str, subtasks: list[dict],
     return False
 
 
+def _review_phase(plan_id: str, goal: str, subtasks: list[dict],
+                  office: dict, gateway: Any, ctx_provider: Any) -> bool:
+    """Фаза code review (viktor на своём провайдере). True = ревью пройдено.
+    critical-замечания возвращают работу последнему пишущему агенту, до
+    MAX_REVIEW_FIXES итераций. Если viktor нет в штате или нет workspace —
+    фаза пропускается (pass)."""
+    viktor = office.get("viktor")
+    root = os.getenv("WORKSPACE_ROOT", "")
+    if viktor is None or not root:
+        return True  # нечем ревьюить или некого — не блокируем
+
+    for attempt in range(MAX_REVIEW_FIXES + 1):
+        result = review.review(plan_id, goal, root, viktor.llm)
+        if result["verdict"] == "pass":
+            return True
+        if attempt == MAX_REVIEW_FIXES:
+            return False
+        fixer = _fixer(subtasks, office)
+        problems = "\n".join(f"- [{c.get('file')}] {c.get('problem')}"
+                             for c in result["criticals"])
+        events.publish("fix_iteration", agent=fixer, plan_id=plan_id,
+                       n=attempt + 1, of=MAX_REVIEW_FIXES, phase="review")
+        fix_goal = (f"ЦЕЛЬ ПРОЕКТА: {goal}\n"
+                    f"CODE REVIEW нашёл критические дефекты (итерация {attempt + 1} "
+                    f"из {MAX_REVIEW_FIXES}):\n{problems}\n"
+                    f"ТВОЯ ЗАДАЧА: исправь эти дефекты. Перед правкой файла прочитай "
+                    f"его (read_file) и сохрани весь существующий код.")
+        run_id = runner.create_run(fix_goal, fixer, plan_id=plan_id)
+        state = runner.drive(run_id, office, gateway, ctx_provider)
+        if state["status"] != "done":
+            return False
+    return False
+
+
 def run_project(plan_id: str, office: dict, gateway: Any) -> dict:
     """Ведёт подзадачи плана последовательно до конца / первого провала.
     Синхронная функция: на сервере запускается в фоне (BackgroundTasks).
@@ -321,7 +357,14 @@ def _run_project(plan_id: str, office: dict, gateway: Any) -> dict:
                        detail=detail)
         return get_plan(plan_id)
 
-    summary = f"все {total} подзадач выполнены, самопроверка зелёная"
+    if not _review_phase(plan_id, plan["goal"], subtasks, office, gateway, ctx_provider):
+        detail = f"code review не пройден после {MAX_REVIEW_FIXES} итераций исправлений"
+        _update(plan_id, status="failed", summary=detail)
+        events.publish("project_failed", agent="kristina", plan_id=plan_id,
+                       detail=detail)
+        return get_plan(plan_id)
+
+    summary = f"все {total} подзадач выполнены, самопроверка и ревью зелёные"
     _update(plan_id, status="done", summary=summary)
     events.publish("project_done", agent="kristina", plan_id=plan_id,
                    summary=summary)
