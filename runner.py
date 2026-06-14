@@ -108,11 +108,12 @@ def drive(run_id: str, office: dict, gateway: Any,
     row = _get(run_id)
     if row is None:
         raise KeyError(run_id)
+    plan_id = row["plan_id"]
     agent = office.get(row["agent_id"])
     if agent is None:
         _update(run_id, status="failed", summary=f"нет агента {row['agent_id']}")
         events.publish("run_failed", agent=row["agent_id"], run_id=run_id,
-                       detail=f"нет агента {row['agent_id']}")
+                       plan_id=plan_id, detail=f"нет агента {row['agent_id']}")
         return _state(run_id)
 
     history: list[dict] = json.loads(row["history"])
@@ -127,7 +128,7 @@ def drive(run_id: str, office: dict, gateway: Any,
             _update(run_id, status="done", history=json.dumps(history, ensure_ascii=False),
                     steps=steps, summary=decision.get("summary", ""))
             events.publish("run_done", agent=agent.id, run_id=run_id,
-                           steps=steps, summary=decision.get("summary", ""))
+                           plan_id=plan_id, steps=steps, summary=decision.get("summary", ""))
             return _state(run_id)
 
         if not decision.get("action"):
@@ -137,13 +138,13 @@ def drive(run_id: str, office: dict, gateway: Any,
             _update(run_id, status="failed", history=json.dumps(history, ensure_ascii=False),
                     steps=steps, summary=detail)
             events.publish("run_failed", agent=agent.id, run_id=run_id,
-                           steps=steps, detail=detail)
+                           plan_id=plan_id, steps=steps, detail=detail)
             return _state(run_id)
 
         try:
             gw = gateway.propose(agent.id, decision["action"],
                                  decision.get("target", ""), decision.get("params", {}),
-                                 run_id=run_id, reason=decision.get("reason", ""))
+                                 run_id=run_id, plan_id=plan_id, reason=decision.get("reason", ""))
         except Exception as e:
             # Транспорт до шлюза умер (таймаут/сеть). Прогон не «зависает»,
             # а честно падает с диагнозом в ленте.
@@ -152,7 +153,7 @@ def drive(run_id: str, office: dict, gateway: Any,
                     history=json.dumps(history, ensure_ascii=False),
                     steps=steps, summary=detail)
             events.publish("run_failed", agent=agent.id, run_id=run_id,
-                           steps=steps, detail=detail[:500])
+                           plan_id=plan_id, steps=steps, detail=detail[:500])
             return _state(run_id)
         steps += 1
         status = gw.get("status")
@@ -173,7 +174,7 @@ def drive(run_id: str, office: dict, gateway: Any,
     _update(run_id, status="stopped", history=json.dumps(history, ensure_ascii=False),
             steps=steps, summary=f"достигнут лимит шагов ({MAX_STEPS})")
     events.publish("run_stopped", agent=agent.id, run_id=run_id,
-                   steps=steps, detail=f"достигнут лимит шагов ({MAX_STEPS})")
+                   plan_id=plan_id, steps=steps, detail=f"достигнут лимит шагов ({MAX_STEPS})")
     return _state(run_id)
 
 

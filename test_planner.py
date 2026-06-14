@@ -98,8 +98,8 @@ def test_project_runs_subtasks_sequentially_to_done():
     evts = [e for e in events.list_events(after=start) if e["plan_id"] == plan_id]
     kinds = [e["kind"] for e in evts]
     assert kinds == ["plan_created",
-                     "subtask_started", "run_started", "subtask_done",
-                     "subtask_started", "run_started", "subtask_done",
+                     "subtask_started", "run_started", "action_executed", "run_done", "subtask_done",
+                     "subtask_started", "run_started", "action_executed", "run_done", "subtask_done",
                      "verify_started", "verify_passed",
                      "project_done"]
     # Раздача видна: кто взял подзадачу 1 и почему проект завершён.

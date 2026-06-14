@@ -36,11 +36,11 @@ class Gateway:
 
     def propose(self, agent_id: str, action: str, target: str,
                 params: dict[str, Any], *, run_id: str | None = None,
-                reason: str = "") -> dict:
+                plan_id: str | None = None, reason: str = "") -> dict:
         url = f"{self.base_url}/actions/propose"
         payload = {"agent_id": agent_id, "action": action,
                    "target": target, "params": params,
-                   "run_id": run_id, "reason": reason}
+                   "run_id": run_id, "plan_id": plan_id, "reason": reason}
         r = (self._client.post(url, json=payload) if self._client
              else httpx.post(url, json=payload, timeout=GATEWAY_HTTP_TIMEOUT))
         if r.status_code == 422:
