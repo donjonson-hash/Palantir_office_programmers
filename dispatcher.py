@@ -36,7 +36,11 @@ class Dispatcher:
         self.llm = llm
         self.default_agent = default_agent
         # Кандидаты на исполнение — все, кроме самой Kristina.
-        self.workers = [name for name in office if name != "kristina"]
+        # Кандидаты на исполнение — все, кроме Kristina (лид) и viktor (ревьюер).
+        # viktor работает в отдельной фазе ревью оркестратора, а не как исполнитель
+        # подзадач — иначе Kristina дублирует автоматическую приёмку в плане.
+        NON_WORKERS = {"kristina", "viktor"}
+        self.workers = [name for name in office if name not in NON_WORKERS]
 
     def route(self, task: str) -> tuple[str, str]:
         roster = "\n".join(

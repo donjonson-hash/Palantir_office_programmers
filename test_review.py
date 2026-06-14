@@ -116,3 +116,14 @@ def test_review_phase_exhausts_and_fails(git_workspace, monkeypatch):
     ok = planner._review_phase("p6", "цель",
                                [{"agent": "bjorn"}], office, GW, lambda a: "")
     assert ok is False
+
+
+def test_viktor_excluded_from_workers():
+    # Ревьюер не должен попадать в исполнители подзадач — иначе Kristina
+    # запланирует на него ревью как подзадачу, дублируя фазу оркестратора.
+    from dispatcher import Dispatcher
+    office = build_office(FakeLLM('{}'), GW)
+    d = Dispatcher(office, FakeLLM('{}'))
+    assert "viktor" not in d.workers
+    assert "kristina" not in d.workers
+    assert "bjorn" in d.workers and "ingrid" in d.workers
