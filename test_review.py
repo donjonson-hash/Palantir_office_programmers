@@ -21,6 +21,7 @@ import action_service  # noqa: E402
 import events  # noqa: E402
 import planner  # noqa: E402
 import review  # noqa: E402
+import runner  # noqa: E402
 from agents import Gateway, build_office  # noqa: E402
 from llm import FakeLLM, ScriptedLLM  # noqa: E402
 
@@ -127,3 +128,45 @@ def test_viktor_excluded_from_workers():
     assert "viktor" not in d.workers
     assert "kristina" not in d.workers
     assert "bjorn" in d.workers and "ingrid" in d.workers
+
+
+def test_diagnose_explains_failure(git_workspace):
+    # viktor-диагност при провале: читает код, публикует объяснение в ленту.
+    start = _cursor()
+    llm = FakeLLM('{"diagnosis":"Потерян POST-обработчик при перезаписи route.ts",'
+                  '"fixes":["Восстановить export async function POST"]}')
+    out = review.diagnose("pd", "цель", "самопроверка упала", str(git_workspace), llm)
+    assert "POST" in out["diagnosis"]
+    kinds = [e["kind"] for e in events.list_events(after=start)]
+    assert "diagnose_started" in kinds and "diagnosis" in kinds
+    dg = next(e for e in events.list_events(after=start) if e["kind"] == "diagnosis")
+    assert "POST" in dg["payload"]["diagnosis"]
+    assert dg["payload"]["fixes"]
+
+
+def test_diagnose_silent_without_workspace():
+    # Без workspace диагност молчит, не падает.
+    out = review.diagnose("pd2", "цель", "провал", "", FakeLLM('{}'))
+    assert out == {}
+
+
+def test_failed_subtask_triggers_diagnosis(git_workspace, monkeypatch):
+    # Сквозной путь: подзадача упирается в лимит шагов → провал проекта →
+    # viktor-диагност вызывается перед project_failed.
+    start = _cursor()
+    monkeypatch.setattr(runner, "MAX_STEPS", 2)
+    office = build_office(ScriptedLLM(
+        ['{"action":"read_file","target":"r","params":{"path":"a"},"reason":"x"}'] * 10), GW)
+    office["viktor"].llm = FakeLLM('{"diagnosis":"Агент зациклился на чтении файла",'
+                                   '"fixes":["Завершать подзадачу через done"]}')
+    plan_id = planner.make_plan("цель", ScriptedLLM([
+        '{"subtasks":[{"agent":"bjorn","title":"код","description":"написать код",'
+        '"acceptance":"готово","depends_on":[]}]}']), {"bjorn": "Backend"})
+
+    plan = planner.run_project(plan_id, office, GW)
+
+    assert plan["status"] == "failed"
+    kinds = [e["kind"] for e in events.list_events(after=start) if e["plan_id"] == plan_id]
+    # диагноз идёт ПЕРЕД project_failed
+    assert "diagnosis" in kinds
+    assert kinds.index("diagnosis") < kinds.index("project_failed")

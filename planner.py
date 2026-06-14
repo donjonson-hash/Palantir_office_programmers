@@ -259,6 +259,18 @@ def _verification_phase(plan_id: str, goal: str, subtasks: list[dict],
     return False
 
 
+def _fail_project(plan_id: str, goal: str, detail: str, office: dict) -> dict:
+    """Единый провал проекта: сначала viktor-диагност объясняет, ЧТО сломалось
+    (если есть workspace и ревьюер), затем фиксируем failed + project_failed."""
+    viktor = office.get("viktor")
+    root = os.getenv("WORKSPACE_ROOT", "")
+    if viktor is not None and root:
+        review.diagnose(plan_id, goal, detail, root, viktor.llm)
+    _update(plan_id, status="failed", summary=detail)
+    events.publish("project_failed", agent="kristina", plan_id=plan_id, detail=detail)
+    return get_plan(plan_id)
+
+
 def _review_phase(plan_id: str, goal: str, subtasks: list[dict],
                   office: dict, gateway: Any, ctx_provider: Any) -> bool:
     """Фаза code review (viktor на своём провайдере). True = ревью пройдено.
@@ -344,29 +356,21 @@ def _run_project(plan_id: str, office: dict, gateway: Any) -> dict:
         st["status"] = "failed"
         _save_subtasks(plan_id, subtasks)
         detail = f"подзадача {st['n']} «{st['title']}»: прогон {state['status']}"
-        _update(plan_id, status="failed", summary=detail)
+        _save_subtasks(plan_id, subtasks)
         events.publish("subtask_failed", agent=st["agent"], plan_id=plan_id,
                        run_id=run_id, n=st["n"], title=st["title"],
                        detail=state.get("summary", state["status"]))
-        events.publish("project_failed", agent="kristina", plan_id=plan_id,
-                       detail=detail)
-        return get_plan(plan_id)
+        return _fail_project(plan_id, plan["goal"], detail, office)
 
     if not _verification_phase(plan_id, plan["goal"], subtasks,
                                office, gateway, ctx_provider):
         detail = (f"самопроверка не прошла после {MAX_FIX_ITERATIONS} "
                   f"итераций исправлений")
-        _update(plan_id, status="failed", summary=detail)
-        events.publish("project_failed", agent="kristina", plan_id=plan_id,
-                       detail=detail)
-        return get_plan(plan_id)
+        return _fail_project(plan_id, plan["goal"], detail, office)
 
     if not _review_phase(plan_id, plan["goal"], subtasks, office, gateway, ctx_provider):
         detail = f"code review не пройден после {MAX_REVIEW_FIXES} итераций исправлений"
-        _update(plan_id, status="failed", summary=detail)
-        events.publish("project_failed", agent="kristina", plan_id=plan_id,
-                       detail=detail)
-        return get_plan(plan_id)
+        return _fail_project(plan_id, plan["goal"], detail, office)
 
     summary = f"все {total} подзадач выполнены, самопроверка и ревью зелёные"
     _update(plan_id, status="done", summary=summary)
