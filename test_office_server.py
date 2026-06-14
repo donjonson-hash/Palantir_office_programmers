@@ -14,6 +14,7 @@ for var in ("AUDIT_DB_PATH", "OFFICE_DB_PATH", "EVENTS_DB_PATH"):
     os.environ[var] = f.name
 
 from fastapi.testclient import TestClient  # noqa: E402
+import pytest
 import action_service  # noqa: E402
 import office_server  # noqa: E402
 from agents import Gateway, build_office  # noqa: E402
@@ -21,6 +22,13 @@ from dispatcher import Dispatcher  # noqa: E402
 from llm import FakeLLM  # noqa: E402
 
 GW = Gateway(base_url="", client=TestClient(action_service.app))
+
+
+@pytest.fixture(autouse=True)
+def _stub_execute(monkeypatch):
+    monkeypatch.setattr(action_service, "execute",
+                        lambda action, target, params: f"[stub] {action}")
+
 office = TestClient(office_server.app)
 
 
